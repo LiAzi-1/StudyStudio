@@ -2,6 +2,8 @@ const { app, protocol, net } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const noteAssets = require('./noteAssets.js');
+const wrongAssets = require('./wrongAssets.js');
 
 const ASSET_SCHEME = 'openexam-asset';
 const ASSET_HOST = 'question-assets';
@@ -17,9 +19,14 @@ function getAssetRoots() {
 }
 
 function normalizeRelativePath(input = '') {
-  const value = String(input || '').replace(/^\/+/, '');
+  // 反斜杠在 Windows 上会被 path.join 当成目录分隔符，
+  // 必须先统一成正斜杠再做 posix normalize，否则 `..\\..\\x` 可以逃出资源根目录。
+  const value = String(input || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!value || value.includes('\0')) return '';
   const normalized = path.posix.normalize(value);
-  if (!normalized || normalized === '.' || normalized.startsWith('..')) return '';
+  if (!normalized || normalized === '.' || normalized === '..') return '';
+  if (normalized.startsWith('../')) return '';
+  if (path.posix.isAbsolute(normalized) || /^[a-z]:/i.test(normalized)) return '';
   return normalized;
 }
 
@@ -35,13 +42,19 @@ function resolveAssetPath(relativePath = '') {
     : [];
 
   for (const root of getAssetRoots()) {
+    const rootResolved = path.resolve(root);
+    const isInsideRoot = (candidate) => {
+      const resolved = path.resolve(candidate);
+      return resolved === rootResolved || resolved.startsWith(`${rootResolved}${path.sep}`);
+    };
+
     const exact = path.join(root, safeRelativePath);
-    if (fs.existsSync(exact) && fs.statSync(exact).isFile()) {
+    if (isInsideRoot(exact) && fs.existsSync(exact) && fs.statSync(exact).isFile()) {
       return exact;
     }
     for (const fallbackRelativePath of fallbackCandidates) {
       const candidate = path.join(root, fallbackRelativePath);
-      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      if (isInsideRoot(candidate) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
         return candidate;
       }
     }
@@ -68,6 +81,46 @@ function parseAssetRequest(requestUrl = '') {
 
 function registerProtocol() {
   protocol.handle(ASSET_SCHEME, (request) => {
+    // 笔记图片走同一个 scheme，用 host 区分（note-assets/<noteId>/<file>）
+    let host = '';
+    let pathname = '';
+    try {
+      const url = new URL(request.url);
+      host = url.host;
+      pathname = url.pathname || '';
+    } catch (_) {
+      return new Response('Bad Request', { status: 400 });
+    }
+
+    if (host === noteAssets.NOTE_HOST) {
+      let relative = '';
+      try {
+        relative = decodeURIComponent(pathname).replace(/^\/+/, '');
+      } catch (_) {
+        return new Response('Bad Request', { status: 400 });
+      }
+      const notePath = noteAssets.resolveNoteAssetPath(relative);
+      if (!notePath || !fs.existsSync(notePath)) {
+        return new Response('Asset Not Found', { status: 404 });
+      }
+      return net.fetch(pathToFileURL(notePath).href);
+    }
+
+    // 错题图片（wrong-assets/<wrongId>/<file>）
+    if (host === wrongAssets.WRONG_HOST) {
+      let relative = '';
+      try {
+        relative = decodeURIComponent(pathname).replace(/^\/+/, '');
+      } catch (_) {
+        return new Response('Bad Request', { status: 400 });
+      }
+      const wrongPath = wrongAssets.resolveWrongAssetPath(relative);
+      if (!wrongPath || !fs.existsSync(wrongPath)) {
+        return new Response('Asset Not Found', { status: 404 });
+      }
+      return net.fetch(pathToFileURL(wrongPath).href);
+    }
+
     const relativePath = parseAssetRequest(request.url);
     const filePath = resolveAssetPath(relativePath);
     if (!filePath) {

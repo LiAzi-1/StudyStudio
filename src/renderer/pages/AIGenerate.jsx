@@ -1,31 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { getAISettings, isAIConfigured } from "../store/aiSettings.js";
+import { getRoleSettings, isRoleConfigured } from "../store/aiSettings.js";
 import { buildPaperShareText, copyText } from "../utils/paperShare.js";
 import { useDialog } from "../components/DialogProvider.jsx";
 
 const CATEGORIES = [
-  { key: "yanyu", name: "言语理解" }, { key: "shuliang", name: "数量关系" },
-  { key: "panduan", name: "判断推理" }, { key: "ziliao", name: "资料分析" },
-  { key: "changshi", name: "常识判断" },
+  { key: "math", name: "数学" }, { key: "english", name: "英语" },
+  { key: "politics", name: "政治" }, { key: "major", name: "专业课" },
 ];
 const DEFAULT_MIXED_CATEGORIES = CATEGORIES.map((item) => item.key);
-const EXAM_TRACKS = [
-  { key: "gongkao", name: "考公" },
-  { key: "shiye", name: "事业单位" },
-  { key: "kaoyan", name: "考研" },
-  { key: "self", name: "自定义备考" },
-];
-const TRACK_SUBJECTS = {
-  gongkao: "xingce",
-  shiye: "shiye",
-  kaoyan: "kaoyan",
-  self: "custom",
-};
 const FOCUS_PRESETS = [
   { key: "standard", name: "通用组卷" },
-  { key: "idiom", name: "成语练习" },
-  { key: "current_affairs", name: "时政热点" },
-  { key: "computer", name: "计算机基础" },
+  { key: "past_paper", name: "历年真题" },
+  { key: "weakness", name: "薄弱考点" },
   { key: "custom", name: "自定义方向" },
 ];
 const ANALYSIS_MODES = [
@@ -79,9 +65,8 @@ function getSavedPaperMeta(type) {
   };
 }
 
-function getTrackLabel(track, customTrackName = "") {
-  if (track === "self") return String(customTrackName || "自定义备考").trim() || "自定义备考";
-  return EXAM_TRACKS.find((item) => item.key === track)?.name || track || "未分类";
+function getTrackLabel() {
+  return "考研";
 }
 
 function getFocusLabel(focus, customFocusName = "") {
@@ -89,16 +74,12 @@ function getFocusLabel(focus, customFocusName = "") {
   return FOCUS_PRESETS.find((item) => item.key === focus)?.name || focus || "通用组卷";
 }
 
-function getPaperSubject(config = {}) {
-  if (config.track === "self") {
-    const customSubject = String(config.customTrackName || "").trim();
-    return customSubject || TRACK_SUBJECTS.self;
-  }
-  return TRACK_SUBJECTS[config.track] || "xingce";
+function getPaperSubject() {
+  return "kaoyan";
 }
 
 function getGeneratedTitle(config = {}) {
-  const trackLabel = getTrackLabel(config.track, config.customTrackName);
+  const trackLabel = getTrackLabel();
   const focusLabel = getFocusLabel(config.focus, config.customFocusName);
   const modeLabel = config.mode === "mixed"
     ? "综合组卷"
@@ -107,14 +88,13 @@ function getGeneratedTitle(config = {}) {
   return `${trackLabel} · ${focusLabel} · ${modeLabel} · ${difficultyLabel}`;
 }
 
-export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
+export default function AIGenerate({ onOpenPaper }) {
   const [config, setConfig] = useState({
-    track: "gongkao",
-    customTrackName: "",
+    track: "kaoyan",
     focus: "standard",
     customFocusName: "",
     mode: "single",
-    category: "yanyu",
+    category: "math",
     mixedCategories: [...DEFAULT_MIXED_CATEGORIES],
     analysisMode: "brief",
     includeCurrentAffairs: false,
@@ -184,11 +164,6 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
     }
   }, [generated?.title]);
 
-  useEffect(() => {
-    if (!globalTrack) return;
-    setConfig((prev) => (prev.track === globalTrack ? prev : { ...prev, track: globalTrack }));
-  }, [globalTrack]);
-
   const handleGenerate = async () => {
     const token = generationTokenRef.current + 1;
     generationTokenRef.current = token;
@@ -201,7 +176,7 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
       showToast({ title: "参数不完整", message: msg, tone: "warning" });
       return;
     }
-    if (!isAIConfigured() || !window.openexam?.ai) {
+    if (!isRoleConfigured("teacher") || !window.openexam?.ai) {
       const msg = "请先在「设置」中配置 AI 服务。";
       setError(msg);
       pushFeedback("error", msg);
@@ -239,11 +214,11 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
     }, 280);
 
     try {
-      const settings = getAISettings();
+      const settings = getRoleSettings("teacher");
       const categoryText = config.mode === "mixed"
         ? config.mixedCategories.map((key) => CATEGORIES.find((c) => c.key === key)?.name || key).join("、")
         : (CATEGORIES.find((c) => c.key === config.category)?.name || config.category);
-      pushFeedback("info", `参数已提交：${getTrackLabel(config.track, config.customTrackName)} / ${config.count}题 / ${categoryText}`);
+      pushFeedback("info", `参数已提交：${getTrackLabel()} / ${config.count}题 / ${categoryText}`);
       const result = await window.openexam.ai.generatePaper(settings, config);
       if (generationTokenRef.current !== token) return;
       if (result.success && result.questions?.length) {
@@ -494,7 +469,7 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           </div>
           <h2 style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.3px", margin: 0 }}>AI 智能出卷</h2>
-          {!isAIConfigured() && (
+          {!isRoleConfigured("teacher") && (
             <span style={{ fontSize: 11, color: "var(--warning)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", background: "var(--warning-soft)", borderRadius: 20 }}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
               AI 未配置
@@ -509,43 +484,6 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
           <h3 style={{ fontSize: 13, fontWeight: 600 }}>出卷配置</h3>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <div>
-              <label style={{ display: "block", fontSize: 11, fontWeight: 500, color: "var(--text)", marginBottom: 8 }}>考试类目</label>
-              {globalTrack ? (
-                <div style={{ fontSize: 11, color: "var(--accent)", background: "var(--accent-soft-bg)", border: "1px solid var(--accent-border-soft)", borderRadius: 8, padding: "7px 9px" }}>
-                  当前使用全局类目：{getTrackLabel(config.track, config.customTrackName)}
-                </div>
-              ) : (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {EXAM_TRACKS.map((item) => (
-                  <button
-                    key={item.key}
-                    onClick={() => setConfig((prev) => ({ ...prev, track: item.key }))}
-                    style={{
-                      fontSize: 11,
-                      padding: "4px 10px",
-                      borderRadius: 14,
-                      cursor: "pointer",
-                      border: config.track === item.key ? "1px solid var(--accent)" : "1px solid var(--line)",
-                      background: config.track === item.key ? "var(--accent-soft-bg)" : "transparent",
-                      color: config.track === item.key ? "var(--accent)" : "var(--muted)",
-                    }}
-                  >
-                    {item.name}
-                  </button>
-                ))}
-                </div>
-              )}
-              {config.track === "self" && (
-                <input
-                  value={config.customTrackName}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, customTrackName: e.target.value }))}
-                  placeholder="输入你的考试类目，例如：校招、职称考试"
-                  style={{ width: "100%", marginTop: 8, padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--surface)", color: "var(--text)", fontSize: 11 }}
-                />
-              )}
-            </div>
-
             <div>
               <label style={{ display: "block", fontSize: 11, fontWeight: 500, color: "var(--text)", marginBottom: 8 }}>训练方向</label>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -956,7 +894,7 @@ export default function AIGenerate({ onOpenPaper, globalTrack = "" }) {
           
           {generated ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, overflow: "auto", paddingRight: 8 }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "14px 16px", background: "linear-gradient(180deg, var(--accent-soft-bg), rgba(117,109,232,0.03))", borderRadius: 12, border: "1px solid var(--accent-border-soft)" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "14px 16px", background: "linear-gradient(180deg, var(--accent-soft-bg), rgba(31,157,104,0.03))", borderRadius: 12, border: "1px solid var(--accent-border-soft)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 28, height: 28, borderRadius: 6, background: "var(--accent-soft-bg)", color: "var(--accent)", display: "grid", placeItems: "center" }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>

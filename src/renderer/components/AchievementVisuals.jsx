@@ -74,12 +74,12 @@ export const MEDAL_TIER_PALETTE = {
     foil: 'rgba(200,155,83,0.55)',
   },
   master: {
-    rim: '#6e67c4',
+    rim: '#1f9d68',
     rimDeep: '#524ba3',
     face: '#a39ceb',
     faceSoft: '#c8c3f5',
     ink: '#2f2a6b',
-    foil: 'rgba(117,109,232,0.45)',
+    foil: 'rgba(31,157,104,0.45)',
   },
 };
 

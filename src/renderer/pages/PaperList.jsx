@@ -3,44 +3,9 @@ import { actions } from '../store/examStore.js';
 import CustomSelect from '../components/CustomSelect.jsx';
 import { buildPaperShareText, copyText } from '../utils/paperShare.js';
 import { useDialog } from '../components/DialogProvider.jsx';
+import LuoCat from '../components/LuoCat.jsx';
 
 // 省份标签数据
-const PROVINCES = [
-  { key: 'all', label: '全部' },
-  { key: 'national', label: '国考' },
-  { key: '安徽', label: '安徽' },
-  { key: '北京', label: '北京' },
-  { key: '福建', label: '福建' },
-  { key: '甘肃', label: '甘肃' },
-  { key: '广东', label: '广东' },
-  { key: '广西', label: '广西' },
-  { key: '贵州', label: '贵州' },
-  { key: '海南', label: '海南' },
-  { key: '河北', label: '河北' },
-  { key: '河南', label: '河南' },
-  { key: '黑龙江', label: '黑龙江' },
-  { key: '湖北', label: '湖北' },
-  { key: '湖南', label: '湖南' },
-  { key: '吉林', label: '吉林' },
-  { key: '江苏', label: '江苏' },
-  { key: '江西', label: '江西' },
-  { key: '辽宁', label: '辽宁' },
-  { key: '内蒙古', label: '内蒙古' },
-  { key: '宁夏', label: '宁夏' },
-  { key: '青海', label: '青海' },
-  { key: '山东', label: '山东' },
-  { key: '山西', label: '山西' },
-  { key: '陕西', label: '陕西' },
-  { key: '上海', label: '上海' },
-  { key: '四川', label: '四川' },
-  { key: '天津', label: '天津' },
-  { key: '新疆', label: '新疆' },
-  { key: '云南', label: '云南' },
-  { key: '浙江', label: '浙江' },
-  { key: '重庆', label: '重庆' },
-  { key: '深圳', label: '深圳' },
-];
-
 const PAPER_PROVINCE_ALIASES = {
   '北京市': '北京',
   '天津市': '天津',
@@ -65,25 +30,6 @@ function normalizePaperProvince(value) {
 }
 
 const PAGE_SIZE = 12;
-const TRACK_SUBJECTS = {
-  gongkao: 'xingce',
-  shiye: 'shiye',
-  kaoyan: 'kaoyan',
-  self: 'custom',
-};
-const TRACK_LABELS = {
-  gongkao: '考公',
-  shiye: '事业单位',
-  kaoyan: '考研',
-  self: '自定义',
-};
-
-function matchTrack(paper, track = 'gongkao') {
-  const expected = TRACK_SUBJECTS[track] || TRACK_SUBJECTS.gongkao;
-  const subject = String(paper?.subject || '').trim();
-  if (track === 'gongkao') return !subject || subject === expected;
-  return subject === expected;
-}
 
 function getPaperBadge(paper) {
   switch (paper?.type) {
@@ -117,10 +63,9 @@ function hasAnyAnswer(record) {
   });
 }
 
-export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken = 0, examTrack = 'gongkao', onGoAIGenerate }) {
+export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword = '', focusToken = 0, onGoAIGenerate, embedded = false }) {
   const [papers, setPapers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selectedProvince, setSelectedProvince] = useState('all');
   const [selectedYear, setSelectedYear] = useState('all');
   const [selectedSubject, setSelectedSubject] = useState('all');
   const [keyword, setKeyword] = useState(initialKeyword);
@@ -157,14 +102,12 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
   }, [initialKeyword]);
 
   useEffect(() => {
-    if (!focusToken) return;
+    // 首屏还在 loading 时搜索框尚未挂载，等数据回来后再聚焦
+    if (!focusToken || loading) return;
     keywordInputRef.current?.focus();
-  }, [focusToken]);
+  }, [focusToken, loading]);
 
-  const trackPapers = useMemo(
-    () => papers.filter((paper) => matchTrack(paper, examTrack)),
-    [papers, examTrack]
-  );
+  const trackPapers = useMemo(() => papers, [papers]);
   // 获取可用筛选项
   const years = useMemo(() => [...new Set(trackPapers.map(p => p.year))].sort((a, b) => b - a), [trackPapers]);
   const subjects = useMemo(() => [...new Set(trackPapers.map(p => String(p.subject || '').trim()).filter(Boolean))], [trackPapers]);
@@ -172,14 +115,6 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
 
   // 筛选试卷
   const filteredPapers = trackPapers.filter(p => {
-    // 省份筛选
-    if (selectedProvince !== 'all') {
-      if (selectedProvince === 'national') {
-        if (p.type !== 'national') return false;
-      } else {
-        if (normalizePaperProvince(p.province) !== selectedProvince) return false;
-      }
-    }
     // 年份筛选
     if (selectedYear !== 'all' && p.year !== parseInt(selectedYear)) return false;
     // 科目筛选
@@ -208,14 +143,13 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
   // 筛选变化时重置页码
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedProvince, selectedYear, selectedSubject, normalizedKeyword]);
+  }, [selectedYear, selectedSubject, normalizedKeyword]);
 
   useEffect(() => {
-    setSelectedProvince('all');
     setSelectedYear('all');
     setSelectedSubject('all');
     setCurrentPage(1);
-  }, [examTrack]);
+  }, []);
 
   const handleStart = async (paper, options = {}) => {
     onOpenPaper?.({
@@ -258,31 +192,14 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
 
   if (loading) {
     return (
-      <div className="paper-list-page">
+      <div className="paper-list-page" style={embedded ? { padding: 0, height: 'auto', overflowY: 'visible' } : undefined}>
         <div className="loading-state">加载中...</div>
       </div>
     );
   }
 
   return (
-    <div className="paper-list-page">
-      {/* 省份标签筛选 */}
-      {examTrack === 'gongkao' && (
-        <div className="province-filter">
-          <div className="province-tags">
-            {PROVINCES.map(p => (
-              <button
-                key={p.key}
-                className={`province-tag ${selectedProvince === p.key ? 'active' : ''}`}
-                onClick={() => setSelectedProvince(p.key)}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
+    <div className="paper-list-page" style={embedded ? { padding: 0, height: 'auto', overflowY: 'visible' } : undefined}>
       {/* 年份筛选和统计 */}
       <div className="filter-bar">
         <div className="filter-left">
@@ -328,7 +245,6 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
           />
         </div>
         <div className="filter-right">
-          <span className="result-count" style={{ marginRight: 8 }}>类目：{TRACK_LABELS[examTrack] || examTrack}</span>
           <span className="result-count">共 {filteredPapers.length} 套试卷</span>
         </div>
       </div>
@@ -355,6 +271,15 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
               </span>
             </div>
             <div className="paper-actions">
+              {onReviewPaper && (
+                <button
+                  className={`paper-action-btn ${hasResumeRecord ? 'paper-action-btn--ghost' : 'paper-action-btn--accent'}`}
+                  onClick={() => onReviewPaper(paper)}
+                  title="只读看题：直接看题干、答案与解析，不计时也不用交卷"
+                >
+                  看题
+                </button>
+              )}
               <button
                 className="paper-action-btn paper-action-btn--ghost"
                 onClick={() => handleExportPaper(paper)}
@@ -390,9 +315,10 @@ export default function PaperList({ onOpenPaper, initialKeyword = '', focusToken
       {/* 空状态 */}
       {filteredPapers.length === 0 && (
         <div className="empty-state">
+          <LuoCat size={46} className="luo-cat-empty" />
           {trackPapers.length === 0 ? (
             <>
-              <p>当前类目（{TRACK_LABELS[examTrack] || examTrack}）暂无内置试卷</p>
+              <p>暂无内置试卷</p>
               <button
                 type="button"
                 onClick={() => onGoAIGenerate?.()}

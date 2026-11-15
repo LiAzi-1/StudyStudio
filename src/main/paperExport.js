@@ -1,6 +1,10 @@
 const { BrowserWindow, app, dialog } = require('electron');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
+const katex = require('katex');
+
+const EXPORT_MATH_RE = /\$\$([\s\S]+?)\$\$|(?<!\\)\$([^$\n]+?)\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/g;
 
 function escapeHtml(value) {
   return String(value || '')
@@ -11,17 +15,102 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function renderRichHtml(value) {
-  const input = String(value || '').trim();
-  if (!input) return '';
-  if (!/<[^>]+>/.test(input)) return escapeHtml(input).replace(/\n/g, '<br/>');
-  return input
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
+function decodeHtml(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, '&');
+}
+
+/** 导出的 HTML 用 data: URL 打开，字体必须内联；只保留 woff2（约 260 KB）即可覆盖全部字形。 */
+let katexCssCache = null;
+function getKatexCss() {
+  if (katexCssCache !== null) return katexCssCache;
+  try {
+    const cssPath = require.resolve('katex/dist/katex.min.css');
+    const fontDir = path.join(path.dirname(cssPath), 'fonts');
+    const css = fsSync.readFileSync(cssPath, 'utf8')
+      .replace(/,\s*url\(fonts\/[^)]+\.(?:woff|ttf)\)\s*format\([^)]*\)/g, '')
+      .replace(/url\(fonts\/([^)]+\.woff2)\)/g, (_, name) => {
+        const data = fsSync.readFileSync(path.join(fontDir, name)).toString('base64');
+        return `url(data:font/woff2;base64,${data})`;
+      });
+    katexCssCache = css;
+  } catch (error) {
+    console.warn('[paperExport] KaTeX 样式内联失败，公式将退回普通字体：', error.message);
+    katexCssCache = '';
+  }
+  return katexCssCache;
+}
+
+/** 与渲染层一致：避免把英文题干里的价格写法 cost $5 and $10 当成公式。 */
+function isLikelyTex(tex) {
+  const text = String(tex || '').trim();
+  if (!text) return false;
+  if (/[\\^_{}=]/.test(text)) return true;
+  if (/^[\d.,]+$/.test(text)) return true;
+  if (/[0-9]/.test(text) && /[+\-*/<>]/.test(text)) return true;
+  if (/\s[A-Za-z]{2,}/.test(text)) return false;
+  return /^[\sA-Za-z0-9.,()+\-*/<>:]+$/.test(text);
+}
+
+function renderTex(tex, displayMode) {
+  try {
+    return katex.renderToString(String(tex || '').trim(), {
+      displayMode,
+      output: 'html',
+      throwOnError: true,
+      strict: 'ignore',
+      trust: false,
+    });
+  } catch (_) {
+    return '';
+  }
+}
+
+/** 纯文本片段：正文转义，$...$ 交给 KaTeX；解析失败的公式原样保留。 */
+function renderMathText(text) {
+  const source = String(text || '');
+  EXPORT_MATH_RE.lastIndex = 0;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = EXPORT_MATH_RE.exec(source)) !== null) {
+    const tex = match[1] ?? match[2] ?? match[3] ?? match[4];
+    const displayMode = match[1] !== undefined || match[4] !== undefined;
+    const looksLikeMath = match[2] === undefined || isLikelyTex(tex);
+    const rendered = tex && looksLikeMath ? renderTex(tex, displayMode) : '';
+    if (!rendered) continue;
+    out += escapeHtml(source.slice(cursor, match.index));
+    out += rendered;
+    cursor = match.index + match[0].length;
+  }
+  out += escapeHtml(source.slice(cursor));
+  return out;
+}
+
+function cleanTag(tag) {
+  return String(tag || '')
     .replace(/\son\w+=("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/src=(['"])\/\//gi, 'src=$1https://')
     .replace(/src=(['"])\/(?!\/)/gi, 'src=$1')
     .replace(/href=(['"])\/\//gi, 'href=$1https://')
     .replace(/href=(['"])\/(?!\/)/gi, 'href=$1');
+}
+
+function renderRichHtml(value) {
+  const input = String(value || '').trim();
+  if (!input) return '';
+  if (!/<[^>]+>/.test(input)) return renderMathText(decodeHtml(input)).replace(/\n/g, '<br/>');
+  // 只处理文本片段，标签单独清洗，避免把属性里的 $ 当成公式定界符
+  return input
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .split(/(<[^>]+>)/g)
+    .map((part) => (/^<[^>]+>$/.test(part) ? cleanTag(part) : renderMathText(decodeHtml(part))))
+    .join('');
 }
 
 function safeFilename(value = 'openexam-paper') {
@@ -96,9 +185,9 @@ function renderAnswer(question, index) {
     <article class="answer-card">
       <div class="answer-head">
         <span>第 ${index + 1} 题</span>
-        <span>答案：${escapeHtml(question.answer || '-')}</span>
+        <span><b class="tb-label">【答案】</b>${renderRichHtml(question.answer || '-')}</span>
       </div>
-      ${(question.analysis_html || question.analysis) ? `<div class="answer-analysis rich-html">${renderRichHtml(question.analysis_html || question.analysis)}</div>` : ''}
+      ${(question.analysis_html || question.analysis) ? `<div class="answer-analysis"><b class="tb-label">【解析】</b><div class="rich-html">${renderRichHtml(question.analysis_html || question.analysis)}</div></div>` : ''}
     </article>
   `;
 }
@@ -106,7 +195,7 @@ function renderAnswer(question, index) {
 function buildPaperHtml(payload) {
   const { paper, questions } = normalizePayload(payload);
   const typeLabel = paper.type === 'national' ? '国考' : (paper.province || '自定义');
-  const subjectLabel = paper.subject === 'xingce' ? '行测' : paper.subject;
+  const subjectLabel = paper.subject === 'kaoyan' ? '考研' : paper.subject;
 
   return `<!doctype html>
   <html lang="zh-CN">
@@ -144,6 +233,18 @@ function buildPaperHtml(payload) {
       .rich-html th { background: #f8fafc; }
       .footer-note { margin-top: 10mm; color: #9ca3af; font-size: 11px; text-align: center; }
       .page-break { page-break-before: always; }
+      /* 教材式题目版式 */
+      .rich-html .tb-p { margin: 0 0 0.7em; line-height: 1.85; text-align: justify; }
+      .rich-html .tb-p:last-child { margin-bottom: 0; }
+      .rich-html .tb-analysis, .rich-html .tb-material { text-indent: 2em; }
+      .rich-html .tb-blank { display: inline-block; min-width: 3.2em; height: .9em; margin: 0 .18em; border-bottom: 1px solid currentColor; }
+      .rich-html .katex { font-size: 1.06em; }
+      .rich-html .katex-display { margin: .7em 0; }
+      .tb-label { color: #4f46e5; font-weight: 700; white-space: nowrap; }
+      .answer-analysis .rich-html { margin-top: 6px; }
+      .option-item { align-items: flex-start; }
+      .option-key { flex: 0 0 auto; min-width: 1.4em; }
+      ${getKatexCss()}
     </style>
   </head>
   <body>

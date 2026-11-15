@@ -133,7 +133,19 @@ export const actions = {
           questionId: q.id,
           paperId: state.currentPaper.id,
           userAnswer: formatAnswer(userAnswer, q.type),
-          correctAnswer: formatAnswer(q.answer, q.type)
+          correctAnswer: formatAnswer(q.answer, q.type),
+          // 附带题目快照：错题库不依赖题库表，删除试卷后错题仍完整可复习
+          snapshot: {
+            type: q.type,
+            content: q.content,
+            contentHtml: q.content_html,
+            options: q.options,
+            analysis: q.analysis,
+            analysisHtml: q.analysis_html,
+            category: q.category,
+            subCategory: q.sub_category,
+            answer: q.answer,
+          },
         });
       }
     });

@@ -2,17 +2,17 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDialog } from "../components/DialogProvider.jsx";
 
 const KIND_META = {
-  vocab: { label: "词语", color: "var(--category-yanyu)", action: "去积累" },
-  essay: { label: "申论", color: "var(--category-changshi)", action: "去作答" },
-  drill: { label: "行测", color: "var(--category-panduan)", action: "去刷题" },
+  vocab: { label: "英语词汇", color: "var(--category-yanyu)", action: "去积累" },
+  essay: { label: "专业课", color: "var(--category-changshi)", action: "去练习" },
+  drill: { label: "专项题库", color: "var(--category-panduan)", action: "去刷题" },
   note: { label: "笔记", color: "var(--category-ziliao)", action: "去记录" },
   custom: { label: "自定", color: "var(--muted)", action: "标记完成" },
 };
 
 const KIND_OPTIONS = [
   { value: "vocab", label: "词语积累" },
-  { value: "essay", label: "申论练习" },
-  { value: "drill", label: "行测刷题" },
+  { value: "essay", label: "专业课练习" },
+  { value: "drill", label: "专项题库练习" },
   { value: "note", label: "笔记复盘" },
   { value: "custom", label: "自定义" },
 ];
@@ -24,6 +24,24 @@ const REPEAT_OPTIONS = [
 ];
 
 const UNIT_LABEL = { count: "个", minutes: "分钟", once: "次" };
+
+const SUBJECT_COLORS = {
+  math: "var(--accent)",
+  english: "var(--category-yanyu)",
+  politics: "var(--category-panduan)",
+  major: "var(--category-changshi)",
+};
+
+const subjectColor = (key) => SUBJECT_COLORS[key] || "var(--info)";
+
+const countAnswered = (answers) => {
+  if (!answers || typeof answers !== "object") return 0;
+  return Object.values(answers).filter((value) => {
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === "object") return true;
+    return String(value ?? "").trim().length > 0;
+  }).length;
+};
 
 function Icon({ path, size = 16 }) {
   return (
@@ -66,6 +84,9 @@ export default function Today({
   onStartEssay,
   onOpenNotes,
   onOpenTemplates,
+  onStartReview,
+  onStartDailyPractice,
+  onOpenDailyReview,
 }) {
   const dialog = useDialog();
   const [daily, setDaily] = useState(null);
@@ -74,16 +95,25 @@ export default function Today({
   const [adding, setAdding] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [managing, setManaging] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState({ total: 0, groups: [] });
+  const [dailyPractice, setDailyPractice] = useState({ set: null, subjects: [], record: null });
+  const [dailyCategory, setDailyCategory] = useState("");
+  const [startingDaily, setStartingDaily] = useState(false);
 
   const load = useCallback(async () => {
     if (!window.openexam?.todo) return;
+    const safe = (promise) => Promise.resolve(promise).catch(() => null);
     try {
-      const [data, streakData] = await Promise.all([
+      const [data, streakData, reviewData, dailyData] = await Promise.all([
         window.openexam.todo.getDaily(),
         window.openexam.todo.getStreak(30),
+        safe(window.openexam.review?.getTodayQueue?.()),
+        safe(window.openexam.dailyPractice?.getToday?.()),
       ]);
       setDaily(data);
       setStreak(streakData?.streak || 0);
+      if (reviewData) setReviewQueue(reviewData);
+      if (dailyData) setDailyPractice(dailyData);
     } catch (error) {
       console.error("加载今日待办失败:", error);
     } finally {
@@ -103,6 +133,35 @@ export default function Today({
   const items = daily?.items || [];
   const summary = daily?.summary || { active: 0, done: 0, percent: 0, allDone: false };
   const overdue = daily?.overdue || [];
+
+  const reviewGroups = reviewQueue?.groups || [];
+  const reviewTotal = Number(reviewQueue?.total) || 0;
+  const dailySet = dailyPractice?.set || null;
+  const dailySubjects = dailyPractice?.subjects || [];
+  const dailyRecord = dailyPractice?.record || null;
+  const dailyTotal = Number(dailySet?.totalCount) || dailySet?.questionIds?.length || 0;
+  const dailyAnswered = countAnswered(dailyRecord?.answers);
+  const dailyDone = dailySet?.status === "done";
+  const dailyAwaitingReview = String(dailyRecord?.status || "").toLowerCase() === "awaiting_review";
+  const effectiveDailyCategory = dailyCategory || dailySubjects[0]?.category || "";
+
+  const openDailyEntry = () => {
+    if (dailyAwaitingReview && dailyRecord) {
+      onOpenDailyReview?.(dailyRecord);
+      return;
+    }
+    startDailyPractice();
+  };
+
+  const startDailyPractice = async () => {
+    if (!onStartDailyPractice || startingDaily) return;
+    setStartingDaily(true);
+    try {
+      await onStartDailyPractice(dailySet?.category || effectiveDailyCategory);
+    } finally {
+      setStartingDaily(false);
+    }
+  };
 
   const toggleDone = async (item) => {
     const next = item.status === "done" ? "todo" : "done";
@@ -195,6 +254,99 @@ export default function Today({
           {summary.allDone && <em className="today-progress-done">今天全清了</em>}
         </span>
       </div>
+
+      <section className="today-quick">
+        <article className="today-quick-card">
+          <div className="today-quick-head">
+            <div>
+              <span className="today-quick-kicker">复习</span>
+              <h2 className="today-quick-title">今天该复习</h2>
+            </div>
+            <span className={`today-quick-badge${reviewTotal ? " is-due" : ""}`}>{reviewTotal} 道</span>
+          </div>
+
+          {reviewGroups.length > 0 ? (
+            <div className="today-review-groups">
+              {reviewGroups.map((group) => (
+                <button
+                  key={group.key}
+                  type="button"
+                  className="today-review-row"
+                  onClick={() => onStartReview?.(group.items, group)}
+                >
+                  <span className="today-review-dot" style={{ background: subjectColor(group.key) }} />
+                  <span className="today-review-label">{group.label}</span>
+                  <span className="today-review-count">{group.count} 道</span>
+                  <span className="today-review-go">开始 →</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="today-quick-empty">今天没有到期的复习，按 1 / 2 / 4 / 7 / 15 / 30 天的节奏推进。</p>
+          )}
+
+          <p className="today-quick-hint">在错题本里可以把任意一道题加入今日复习。</p>
+        </article>
+
+        <article className="today-quick-card">
+          <div className="today-quick-head">
+            <div>
+              <span className="today-quick-kicker">每日一练</span>
+              <h2 className="today-quick-title">{dailySet ? dailySet.categoryLabel : "抽一组题"}</h2>
+            </div>
+            {dailySet && (
+              <span className={`today-quick-badge${dailyDone ? " is-done" : ""}`}>
+                {dailyDone ? "已完成" : dailyAwaitingReview ? "待自评" : `${dailyAnswered}/${dailyTotal}`}
+              </span>
+            )}
+          </div>
+
+          {dailySet ? (
+            <>
+              <div className="today-daily-meta">
+                <span>{dailyTotal} 题 · 当天固定</span>
+                <span>{dailyDone ? `正确率 ${dailySet.accuracy}%` : dailyAwaitingReview ? "自评完才算完成" : "中断后可继续"}</span>
+              </div>
+              <div className="today-daily-bar">
+                <div
+                  className="today-daily-bar-fill"
+                  style={{ width: `${dailyDone ? 100 : (dailyTotal ? Math.round((dailyAnswered / dailyTotal) * 100) : 0)}%` }}
+                />
+              </div>
+              <button type="button" className="today-quick-btn" disabled={startingDaily} onClick={openDailyEntry}>
+                {startingDaily ? "准备中…" : (dailyDone ? "再练一遍" : dailyAwaitingReview ? "去自评" : "继续练习")}
+              </button>
+            </>
+          ) : dailySubjects.length > 0 ? (
+            <>
+              <p className="today-quick-empty">按科目抽 10 道题，当天固定，不重复抽题。</p>
+              <div className="today-daily-subjects">
+                {dailySubjects.map((subject) => (
+                  <button
+                    key={subject.category}
+                    type="button"
+                    className={`today-daily-subject${effectiveDailyCategory === subject.category ? " is-active" : ""}`}
+                    onClick={() => setDailyCategory(subject.category)}
+                  >
+                    {subject.label}
+                    {subject.total > 0 && <em>{subject.total}</em>}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="today-quick-btn"
+                disabled={startingDaily || !effectiveDailyCategory}
+                onClick={startDailyPractice}
+              >
+                {startingDaily ? "准备中…" : "开始今日练习"}
+              </button>
+            </>
+          ) : (
+            <p className="today-quick-empty">题库里还没有可练习的题目，先去导入试卷或题目。</p>
+          )}
+        </article>
+      </section>
 
       {overdue.length > 0 && (
         <div className="today-overdue">

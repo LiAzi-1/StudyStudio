@@ -36,7 +36,7 @@ const METAL = {
     discEdge: '#141218',
     metalHi: '#e8dff8',
     metal: '#b8a8e8',
-    metalLo: '#6e67c4',
+    metalLo: '#1f9d68',
     shadow: 'rgba(24, 18, 36, 0.32)',
   },
 };

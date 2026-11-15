@@ -1,22 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import RichQuestionContent from '../components/RichQuestionContent.jsx';
+import SubjectiveGrader from '../components/SubjectiveGrader.jsx';
 import { useDialog } from '../components/DialogProvider.jsx';
 import { getState } from '../store/examStore.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const CAT_NAMES = {
-  yanyu:    '言语理解',
-  shuliang: '数量关系',
-  panduan:  '判断推理',
-  ziliao:   '资料分析',
-  changshi: '常识判断',
+  math: '数学',
+  english: '英语',
+  politics: '政治',
+  major: '专业课',
 };
 const CAT_COLORS = {
-  yanyu:    { color: 'var(--accent)', bg: 'var(--accent-soft-bg)', soft: 'var(--accent-soft-bg-strong)', border: 'var(--accent-border-soft)' },
-  shuliang: { color: 'var(--info)', bg: 'var(--info-soft)', soft: 'var(--info-soft)', border: 'var(--info-border)' },
-  panduan:  { color: 'var(--success)', bg: 'var(--success-soft)', soft: 'var(--success-soft)', border: 'var(--success-border)' },
-  ziliao:   { color: 'var(--warning)', bg: 'var(--warning-soft)', soft: 'var(--warning-soft)', border: 'var(--warning-border)' },
-  changshi: { color: 'var(--danger)', bg: 'var(--danger-soft)', soft: 'var(--danger-soft)', border: 'var(--danger-border)' },
+  math: { color: 'var(--accent)', bg: 'var(--accent-soft-bg)', soft: 'var(--accent-soft-bg-strong)', border: 'var(--accent-border-soft)' },
+  english: { color: 'var(--info)', bg: 'var(--info-soft)', soft: 'var(--info-soft)', border: 'var(--info-border)' },
+  politics: { color: 'var(--success)', bg: 'var(--success-soft)', soft: 'var(--success-soft)', border: 'var(--success-border)' },
+  major: { color: 'var(--warning)', bg: 'var(--warning-soft)', soft: 'var(--warning-soft)', border: 'var(--warning-border)' },
   default:  { color: 'var(--accent)', bg: 'var(--accent-soft-bg)', soft: 'var(--accent-soft-bg-strong)', border: 'var(--accent-border-soft)' },
 };
 
@@ -45,9 +44,16 @@ const normalizeAnswerByType = (value, type) => {
   return String(value || '').trim();
 };
 
-const isAnswered = (value, type) => (type === 'multiple' ? Array.isArray(value) && value.length > 0 : Boolean(String(value || '').trim()));
+// 导入题 / AI 出卷对主观题的命名不完全一致，统一归到「不打字、可传图批改」这一类
+const SUBJECTIVE_TYPES = ['subjective', 'essay', 'short_answer', 'short-answer', 'writing', '论述', '简答'];
+const isSubjectiveType = (type) => SUBJECTIVE_TYPES.includes(String(type || '').toLowerCase());
+const isAnswered = (value, type) => (type === 'multiple' ? (Array.isArray(value) ? value.length > 0 : toMultipleKeys(value).length > 0) : Boolean(String(value || '').trim()));
 
 const isCorrectAnswer = (userAnswer, correctAnswer, type) => {
+  if (isSubjectiveType(type)) return null;
+  // 没有标准答案（例如导入时只识别到题干）按「不自动判分」处理，
+  // 不能因为答案为空就一律判错，否则这些题会污染错题本。
+  if (!String(correctAnswer || '').trim()) return null;
   if (type === 'multiple') {
     const ua = toMultipleKeys(userAnswer);
     const ca = toMultipleKeys(correctAnswer);
@@ -76,7 +82,7 @@ const normalizeSavedAnswers = (rawAnswers, allQuestions = []) => {
 };
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function ExamRoom({ paperId, questions: propQuestions, config, resumeRecord, onFinish, onExit, onAskAI }) {
+export default function ExamRoom({ paperId, questions: propQuestions, config, resumeRecord, onFinish, onExit, onAskAI, onSwitchToPractice }) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers]           = useState({});
   const [timeElapsed, setTimeElapsed]   = useState(0);
@@ -87,15 +93,21 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
   const [layoutMode, setLayoutMode]     = useState('split');
   const [sessionId, setSessionId]       = useState(() => resumeRecord?.id || `record_${Date.now()}`);
   const [sessionStartTime, setSessionStartTime] = useState(() => resumeRecord?.start_time || resumeRecord?.startTime || new Date().toISOString());
+  // 作答状态同时写一份 ref：选项点击后要立刻落库，等 React state 更新会拿到旧值
+  const answersRef = useRef({});
   const { confirm: showConfirm, alert: showAlert } = useDialog();
   const bodyRef = useRef(null);
   const resumeAppliedRef = useRef(false);
   const autoSubmitRef = useRef(false);
   const persistentPaperId = config?.sourcePaperId || paperId || null;
-  const canPersist = Boolean(persistentPaperId) || Boolean(config?.category) || config?.mode === 'wrong-redo' || Boolean(propQuestions?.length);
   const isMemorizeMode  = config?.mode === 'memorize';
   const isMockMode = config?.mode === 'mock';
+  // 看题模式：导入后默认进入，只读浏览，不计时、不交卷、不要求做完
+  const isReviewMode = config?.mode === 'review';
+  const isBrowseMode = isReviewMode || isMemorizeMode;
   const isWrongRedo = config?.mode === 'wrong-redo';
+  // 只读看题不写练习记录，否则题库列表会平白多出一条「继续作答」
+  const canPersist = !isReviewMode && (Boolean(persistentPaperId) || Boolean(config?.category) || isWrongRedo || Boolean(propQuestions?.length));
   const durationMinutes = Math.max(1, Number(config?.durationMinutes || paper?.duration || 120));
 
   useEffect(() => {
@@ -103,10 +115,11 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     setSessionStartTime(resumeRecord?.start_time || resumeRecord?.startTime || new Date().toISOString());
     resumeAppliedRef.current = false;
     autoSubmitRef.current = false;
+    answersRef.current = {};
     setAnswers({});
     setTimeElapsed(0);
     setCurrentIndex(0);
-    setShowAnalysis(isMemorizeMode && !isMockMode);
+    setShowAnalysis(isBrowseMode && !isMockMode);
     if (propQuestions?.length > 0) {
       setQuestions(propQuestions);
       setPaper({ title: config?.title || `${CAT_NAMES[config?.category] || '专项'}练习`, type: 'practice', duration: durationMinutes });
@@ -115,7 +128,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
       setQuestions(state.currentQuestions || []);
       setPaper(state.currentPaper);
     }
-  }, [paperId, propQuestions, config, durationMinutes, isMemorizeMode, isMockMode]);
+  }, [paperId, propQuestions, config, durationMinutes, isMemorizeMode, isMockMode, isReviewMode]);
 
   useEffect(() => {
     if (!isMockMode) {
@@ -170,6 +183,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     const restoredAnswers = normalizeSavedAnswers(resumeRecord.answers, questions);
     const answeredIndexes = new Set(Object.keys(restoredAnswers));
     const firstPendingIndex = questions.findIndex(q => !answeredIndexes.has(q.id));
+    answersRef.current = restoredAnswers;
     setAnswers(restoredAnswers);
     setTimeElapsed(Math.max(0, Number(resumeRecord.duration || 0)));
     if (firstPendingIndex >= 0) setCurrentIndex(firstPendingIndex);
@@ -193,16 +207,25 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
   const collectResultStats = (answerMap = answers) => {
     let correctCount = 0;
     let answeredCount = 0;
+    let unansweredCount = 0;
+    let subjectiveCount = 0;
     const wrongQuestions = [];
     const reviewOutcomes = [];
     questions.forEach((q) => {
       const userAnswer = answerMap[q.id];
+      // 主观题在纸上作答，不算「未作答」，也不参与自动判分
+      if (isSubjectiveType(q.type)) {
+        subjectiveCount++;
+        return;
+      }
       if (!isAnswered(userAnswer, q.type)) {
+        unansweredCount++;
         if (isWrongRedo) reviewOutcomes.push({ questionId: q.id, outcome: 'again' });
         return;
       }
       answeredCount++;
       const correct = isCorrectAnswer(userAnswer, q.answer, q.type);
+      if (correct === null) return;
       if (correct) {
         correctCount++;
         if (isWrongRedo) reviewOutcomes.push({ questionId: q.id, outcome: 'remembered' });
@@ -212,25 +235,39 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
           paperId: q.paper_id || persistentPaperId,
           userAnswer: formatAnswerForDisplay(userAnswer, q.type),
           correctAnswer: formatAnswerForDisplay(q.answer, q.type),
+          // 附带题目快照：错题库不依赖题库表，删除试卷后错题仍完整可复习
+          snapshot: {
+            type: q.type,
+            content: q.content,
+            contentHtml: q.content_html,
+            options: q.options,
+            analysis: q.analysis,
+            analysisHtml: q.analysis_html,
+            category: q.category,
+            subCategory: q.sub_category,
+            answer: q.answer,
+          },
         });
         if (isWrongRedo) reviewOutcomes.push({ questionId: q.id, outcome: 'again' });
       }
     });
-    return { correctCount, answeredCount, wrongQuestions, reviewOutcomes };
+    return { correctCount, answeredCount, unansweredCount, subjectiveCount, wrongQuestions, reviewOutcomes };
   };
 
   const persistProgress = async (status, answerMap = answers, elapsed = timeElapsed) => {
     if (!window.openexam?.db?.savePracticeRecord || !canPersist) return;
-    const { correctCount } = collectResultStats(answerMap);
+    const { correctCount, subjectiveCount } = collectResultStats(answerMap);
     const totalCount = questions.length;
-    const accuracy = totalCount > 0 ? Math.round((correctCount / totalCount) * 100) : 0;
+    // 主观题交给用户自评，先不计入正确率分母，和结果页口径保持一致
+    const gradedCount = Math.max(totalCount - subjectiveCount, 0);
+    const accuracy = gradedCount > 0 ? Math.round((correctCount / gradedCount) * 100) : 0;
     await window.openexam.db.savePracticeRecord({
       id: sessionId,
       paperId: persistentPaperId,
       category: config?.category || null,
       subCategory: config?.subCategory || null,
       startTime: sessionStartTime,
-      endTime: (status === 'completed' || status === 'abandoned') ? new Date().toISOString() : null,
+      endTime: (status === 'completed' || status === 'awaiting_review' || status === 'abandoned') ? new Date().toISOString() : null,
       duration: elapsed,
       status,
       answers: answerMap,
@@ -244,49 +281,100 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
 
   const handleSelect = async (key) => {
     if (!currentQuestion) return;
-    let nextAnswers = answers;
-    setAnswers((prev) => {
-      const next = { ...prev };
-      if (currentQuestion.type === 'multiple') {
-        const selected = toMultipleKeys(prev[currentQuestion.id]);
-        const exists = selected.includes(key);
-        const updated = exists ? selected.filter((item) => item !== key) : [...selected, key].sort();
-        if (updated.length) next[currentQuestion.id] = updated;
-        else delete next[currentQuestion.id];
-      } else {
-        next[currentQuestion.id] = key;
-      }
-      nextAnswers = next;
-      return next;
-    });
-    if (!isMockMode) setShowAnalysis(true);
+    const prev = answersRef.current || {};
+    const next = { ...prev };
+    if (currentQuestion.type === 'multiple') {
+      const selected = toMultipleKeys(prev[currentQuestion.id]);
+      const exists = selected.includes(key);
+      const updated = exists ? selected.filter((item) => item !== key) : [...selected, key].sort();
+      if (updated.length) next[currentQuestion.id] = updated;
+      else delete next[currentQuestion.id];
+    } else {
+      next[currentQuestion.id] = key;
+    }
+    answersRef.current = next;
+    setAnswers(next);
+    if (!isMockMode && !isSubjectiveType(currentQuestion.type)) setShowAnalysis(true);
     if (canPersist) {
-      try { await persistProgress('ongoing', nextAnswers); } catch (err) { console.error('保存进度失败:', err); }
+      try { await persistProgress('ongoing', next); } catch (err) { console.error('保存进度失败:', err); }
     }
   };
 
-  const goPrev = () => { if (currentIndex > 0) { setCurrentIndex(i => i - 1); setShowAnalysis(isMemorizeMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  const goNext = () => { if (currentIndex < questions.length - 1) { setCurrentIndex(i => i + 1); setShowAnalysis(isMemorizeMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  const goToQ  = i => { setCurrentIndex(i); setShowAnalysis(isMemorizeMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const handleTextAnswer = (value) => {
+    if (!currentQuestion) return;
+    const next = { ...(answersRef.current || {}), [currentQuestion.id]: value };
+    answersRef.current = next;
+    setAnswers(next);
+  };
+
+  const persistTextAnswer = async () => {
+    if (!currentQuestion || !canPersist) return;
+    try { await persistProgress('ongoing', answersRef.current || {}); } catch (err) { console.error('保存文字答案失败:', err); }
+  };
+
+  // 重置本题：清掉这一题的作答，题目本身保留，可以重新做
+  const resetQuestionAnswer = async () => {
+    if (!currentQuestion) return;
+    const next = { ...(answersRef.current || {}) };
+    delete next[currentQuestion.id];
+    answersRef.current = next;
+    setAnswers(next);
+    setShowAnalysis(false);
+    if (canPersist) {
+      try { await persistProgress('ongoing', next); } catch (err) { console.error('重置本题失败:', err); }
+    }
+  };
+
+  // 重置整份：清掉本次所有作答与进度，题目顺序和内容不变
+  const resetAllAnswers = async () => {
+    if (!answeredCount) return;
+    const confirmed = await showConfirm({
+      title: '重置整份练习',
+      message: '会清空本次所有作答和答题进度，题目本身保留，重置后可以从第一题重新做。',
+      confirmText: '重置',
+      cancelText: '取消',
+      tone: 'warning',
+    });
+    if (!confirmed) return;
+    answersRef.current = {};
+    setAnswers({});
+    setCurrentIndex(0);
+    setShowAnalysis(false);
+    if (canPersist) {
+      try { await persistProgress('ongoing', {}); } catch (err) { console.error('重置整份练习失败:', err); }
+    }
+  };
+
+  const goPrev = () => { if (currentIndex > 0) { setCurrentIndex(i => i - 1); setShowAnalysis(isBrowseMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  const goNext = () => { if (currentIndex < questions.length - 1) { setCurrentIndex(i => i + 1); setShowAnalysis(isBrowseMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  const goToQ  = i => { setCurrentIndex(i); setShowAnalysis(isBrowseMode && !isMockMode); bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   const doSubmit = async (forced = false) => {
-    const { correctCount, answeredCount, wrongQuestions, reviewOutcomes } = collectResultStats();
-    const unanswered = questions.length - answeredCount;
-    const accuracy = questions.length > 0 ? Math.round((correctCount / questions.length) * 100) : 0;
+    const latestAnswers = answersRef.current || answers;
+    const { correctCount, unansweredCount, subjectiveCount, wrongQuestions, reviewOutcomes } = collectResultStats(latestAnswers);
+    const gradedCount = Math.max(questions.length - subjectiveCount, 0);
+    const accuracy = gradedCount > 0 ? Math.round((correctCount / gradedCount) * 100) : 0;
+    // 只要还有主观题没自评，就只能算「待自评」，不能落成已完成
+    const nextStatus = subjectiveCount > 0 ? 'awaiting_review' : 'completed';
     const result = {
       totalCount: questions.length,
       correctCount,
-      wrongCount: answeredCount - correctCount,
-      unanswered,
+      wrongCount: wrongQuestions.length,
+      // 主观题写在纸上，交卷后到结果页自评，这里先按「待自评」计
+      pendingReviewCount: subjectiveCount,
+      unanswered: unansweredCount,
       accuracy,
+      status: nextStatus,
       timeElapsed,
-      answers,
+      answers: latestAnswers,
       questions,
       config,
       paperTitle: paper?.title || config?.title || '',
+      // 结果页手动判对错后要回写这条练习记录的分数
+      recordId: canPersist ? sessionId : null,
     };
     try {
-      await persistProgress('completed');
+      await persistProgress(nextStatus, latestAnswers);
       if (isWrongRedo) {
         for (const item of reviewOutcomes) {
           await window.openexam.db.reviewWrongQuestion({ questionId: item.questionId, outcome: item.outcome });
@@ -304,14 +392,19 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
   };
 
   const handleSubmit = async () => {
-    const { answeredCount } = collectResultStats();
-    const unanswered = questions.length - answeredCount;
+    const { unansweredCount, subjectiveCount } = collectResultStats();
+    const detail = [
+      unansweredCount > 0 ? `还有 ${unansweredCount} 题没在应用里作答` : '',
+      subjectiveCount > 0 ? `${subjectiveCount} 道主观题写在纸上，结果页自行判对错` : '',
+    ].filter(Boolean).join('，');
     const confirmed = await showConfirm({
-      title: '确认交卷',
-      message: unanswered > 0 ? `还有 ${unanswered} 题未作答，确认现在提交吗？` : '提交后将无法修改答案。',
-      confirmText: '立即交卷',
-      cancelText: '继续作答',
-      tone: unanswered > 0 ? 'warning' : 'info',
+      title: '结束本次练习',
+      message: detail
+        ? `${detail}。全在纸上作答也没关系，结果页可以逐题对答案、自己判对错。`
+        : '结束后会生成本次练习的结果页，可以逐题对答案。',
+      confirmText: '查看结果',
+      cancelText: '继续做题',
+      tone: 'info',
     });
     if (!confirmed) return;
     await doSubmit(false);
@@ -324,6 +417,8 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
   }, [isMockMode, timeLeft, questions.length]);
 
   const handleExit = async () => {
+    // 看题页随时可走，不需要二次确认，也不保存任何答题进度
+    if (isReviewMode) { onExit(); return; }
     const confirmed = await showConfirm({
       title: '确认退出',
       message: canPersist ? '会自动保存当前进度，下次可继续作答。确定退出吗？' : '当前答题进度将丢失，确定退出吗？',
@@ -338,7 +433,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     onExit();
   };
 
-  const handleAskAI = async () => {
+  const handleAskAI = async (intent = 'explain') => {
     if (canPersist) {
       try { await persistProgress('paused'); } catch (err) { console.error('暂存进度失败:', err); }
     }
@@ -348,6 +443,9 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
         index: currentIndex + 1,
         total: questions.length,
         userAnswer: formatAnswerForDisplay(answers[currentQuestion?.id], currentQuestion?.type),
+        prompt: intent === 'subjective_grade'
+          ? '请批改我的主观题答案：先复述评分标准或参考答案，再逐点判断我的答案是否覆盖关键得分点，指出错误和遗漏，给出可执行的修改建议。不要只给分数。'
+          : undefined,
       });
       return;
     }
@@ -363,7 +461,9 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     return <div style={{ display: 'grid', placeItems: 'center', height: '100vh', color: 'var(--muted)', fontSize: 13 }}>加载中…</div>;
   }
 
-  const answeredCount   = questions.filter(q => isAnswered(answers[q.id], q.type)).length;
+  // 主观题写在纸上，App 里没有可填的内容，进度上按「已完成」算，避免永远差几题
+  const isDoneInApp     = (q) => isSubjectiveType(q.type) || isAnswered(answers[q.id], q.type);
+  const answeredCount   = questions.filter(isDoneInApp).length;
   const progressPercent = Math.round((answeredCount / questions.length) * 100);
   const catPalette      = CAT_COLORS[currentQuestion?.category] || CAT_COLORS.default;
   const timerUrgent = isMockMode && timeLeft !== null && timeLeft <= 300;
@@ -381,7 +481,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     cat,
     name: CAT_NAMES[cat] || cat,
     total: qs.length,
-    done: qs.filter(q => isAnswered(answers[q.id], q.type)).length,
+    done: qs.filter(q => isSubjectiveType(q.type) || isAnswered(answers[q.id], q.type)).length,
     palette: CAT_COLORS[cat] || CAT_COLORS.default,
   }));
 
@@ -393,7 +493,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
         const correctKeys = currentQuestion.type === 'multiple' ? toMultipleKeys(currentQuestion.answer) : [currentQuestion.answer].filter(Boolean);
         const isSelected = selectedKeys.includes(opt.key);
         const isCorrect  = correctKeys.includes(opt.key);
-        const showResult = !isMockMode && (isMemorizeMode || (isAnswered(answers[currentQuestion.id], currentQuestion.type) && showAnalysis));
+        const showResult = !isMockMode && (isBrowseMode || (isAnswered(answers[currentQuestion.id], currentQuestion.type) && showAnalysis));
 
         let border = '1px solid var(--line)', bg = 'var(--surface)', tagBg = 'var(--surface-soft)', tagCol = 'var(--muted)';
         if (showResult) {
@@ -420,15 +520,46 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     </div>
   );
 
+  const renderTextResponse = () => {
+    // 主观题不要求输入文字：写在纸上作答，答案留到交卷后的结果页再对；想让 AI 批改再传手写照片
+    if (isSubjectiveType(currentQuestion.type)) {
+      return (
+        <SubjectiveGrader
+          question={currentQuestion}
+          answerVisible={isBrowseMode}
+          onAskAI={() => handleAskAI('explain')}
+        />
+      );
+    }
+    const value = String(answers[currentQuestion.id] || '');
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <input
+          value={value}
+          onChange={(event) => handleTextAnswer(event.target.value)}
+          onBlur={persistTextAnswer}
+          placeholder="填写答案"
+          style={{ width: '100%', boxSizing: 'border-box', padding: '12px 14px', border: '1px solid var(--line)', borderRadius: 10, background: 'var(--surface)', color: 'var(--text)', font: 'inherit', fontSize: 13 }}
+        />
+        {!isReviewMode && !isMockMode && (
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>答案和解析在交卷后的「对答案」里给，先自己做完。</span>
+        )}
+      </div>
+    );
+  };
+
   // ── Analysis card ──
   const renderAnalysis = () => {
     if (isMockMode) return null;
-    if (!isMemorizeMode && !(isAnswered(answers[currentQuestion.id], currentQuestion.type) && showAnalysis)) return null;
+    const isSubjective = isSubjectiveType(currentQuestion.type);
+    // 做题时不给答案：只有看题 / 背题模式直接展示，或客观题「答完之后」才展开；
+    // 主观题在 App 里没有作答动作，答案统一留到交卷后的结果页对答案
+    if (!isBrowseMode && !showAnalysis) return null;
     const isRight = isCorrectAnswer(answers[currentQuestion.id], currentQuestion.answer, currentQuestion.type);
     return (
       <div style={{ marginTop: 20, padding: '16px 18px', background: 'var(--accent-soft-bg)', borderRadius: 10, border: '1px solid var(--accent-border-soft)', animation: 'fadeIn 0.25s ease-out' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-          {isAnswered(answers[currentQuestion.id], currentQuestion.type) ? (
+        <div style={{ display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+          {!isSubjective && isAnswered(answers[currentQuestion.id], currentQuestion.type) ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, padding: '3px 9px', borderRadius: 5, color: isRight ? 'var(--success)' : 'var(--danger)', background: isRight ? 'var(--success-soft)' : 'var(--danger-soft)' }}>
               {isRight
                 ? <><Ico d={<polyline points="20 6 9 17 4 12"/>} size={12} sw={2.5} col="var(--success)"/>回答正确</>
@@ -436,13 +567,17 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
               }
             </span>
           ) : null}
-          <span style={{ fontSize: 12, color: 'var(--text)', fontWeight: 500 }}>
-            正确答案：<span style={{ color: 'var(--accent)', fontWeight: 700 }}>{formatAnswerForDisplay(currentQuestion.answer, currentQuestion.type)}</span>
-          </span>
+          <div style={{ fontSize: 12, color: 'var(--text)', fontWeight: 500, display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 4 }}>
+            <span className="tb-label">{isSubjective ? '【参考答案】' : '【答案】'}</span>
+            <RichQuestionContent
+              value={formatAnswerForDisplay(currentQuestion.answer, currentQuestion.type) || '暂无，建议让 AI 老师批改'}
+              className="tb-inline tb-answer-text"
+            />
+          </div>
         </div>
         {(currentQuestion.analysis_html || currentQuestion.analysis) && (
-          <div style={{ fontSize: 12, lineHeight: 1.75, color: 'var(--muted)' }}>
-            <strong style={{ color: 'var(--text)', fontWeight: 600, display: 'block', marginBottom: 6 }}>解析：</strong>
+          <div style={{ fontSize: 12, lineHeight: 1.85, color: 'var(--muted)' }}>
+            <div className="tb-label tb-label-plain" style={{ fontSize: 12, marginBottom: 6 }}>【解析】</div>
             <RichQuestionContent value={currentQuestion.analysis_html || currentQuestion.analysis} className="rich-question-analysis" />
           </div>
         )}
@@ -456,15 +591,17 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
       {/* ═══ TOP BAR ═══ */}
       <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px 0 80px', height: 52, borderBottom: '1px solid var(--line)', background: 'var(--surface)', flexShrink: 0, zIndex: 10, WebkitAppRegion: 'drag' }}>
         {/* Exit */}
-        <button onClick={handleExit} style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 5, background: 'transparent', border: '1px solid var(--line)', padding: '5px 13px', borderRadius: 16, fontSize: 12, fontWeight: 500, color: 'var(--text)', cursor: 'pointer', transition: 'all 0.2s' }}
+        <button onClick={isReviewMode ? onExit : handleExit} style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 5, background: 'transparent', border: '1px solid var(--line)', padding: '5px 13px', borderRadius: 16, fontSize: 12, fontWeight: 500, color: 'var(--text)', cursor: 'pointer', transition: 'all 0.2s' }}
           onMouseOver={e => e.currentTarget.style.background = 'var(--surface-soft)'}
           onMouseOut={e => e.currentTarget.style.background = 'transparent'}>
           <Ico d={<><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>} size={13} sw={2} />
-          退出
+          {isReviewMode ? '返回题库' : '退出'}
         </button>
 
         {/* Title */}
-        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', letterSpacing: '0.5px' }}>{paper?.title}</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', letterSpacing: '0.5px' }}>
+          {isReviewMode ? `看题 · ${paper?.title || config?.title || ''}` : paper?.title}
+        </div>
 
         {/* Right controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, WebkitAppRegion: 'no-drag' }}>
@@ -485,18 +622,51 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
             问 AI
           </button>
 
-          {/* Timer */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', background: timerUrgent ? 'var(--danger-soft)' : 'var(--accent-soft-bg)', borderRadius: 16, color: timerUrgent ? 'var(--danger)' : 'var(--accent)', fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
-            <Ico d={<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>} size={13} sw={2} col={timerUrgent ? 'var(--danger)' : 'var(--accent)'} />
-            {isMockMode ? formatTime(timeLeft ?? 0) : formatTime(timeElapsed)}
-          </div>
+          {/* Timer：看题模式不计时，避免制造「必须做完」的压力 */}
+          {!isReviewMode && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', background: timerUrgent ? 'var(--danger-soft)' : 'var(--accent-soft-bg)', borderRadius: 16, color: timerUrgent ? 'var(--danger)' : 'var(--accent)', fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
+              <Ico d={<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>} size={13} sw={2} col={timerUrgent ? 'var(--danger)' : 'var(--accent)'} />
+              {isMockMode ? formatTime(timeLeft ?? 0) : formatTime(timeElapsed)}
+            </div>
+          )}
 
-          {/* Submit */}
-          <button onClick={handleSubmit} style={{ padding: '7px 20px', borderRadius: 16, background: 'var(--accent)', color: '#fff', border: 'none', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 10px 20px rgba(15,23,42,0.1)', transition: 'transform 0.1s' }}
-            onPointerDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
-            onPointerUp={e => e.currentTarget.style.transform = ''}>
-            交卷
-          </button>
+          {/* 看题页不交卷；想做题时一键切到练习模式 */}
+          {isReviewMode ? (
+            <button
+              onClick={() => onSwitchToPractice?.()}
+              disabled={!onSwitchToPractice}
+              title="切到做题模式，选择/填空题可作答"
+              style={{ padding: '7px 20px', borderRadius: 16, background: 'var(--accent)', color: '#fff', border: 'none', fontSize: 13, fontWeight: 600, cursor: onSwitchToPractice ? 'pointer' : 'default', opacity: onSwitchToPractice ? 1 : 0.5 }}
+            >
+              开始作答
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={resetQuestionAnswer}
+                disabled={!currentQuestion || !isAnswered(answers[currentQuestion.id], currentQuestion.type)}
+                title="清空当前题的作答，题目保留"
+                style={{ padding: '5px 11px', borderRadius: 16, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--muted)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+              >
+                重置本题
+              </button>
+              <button
+                type="button"
+                onClick={resetAllAnswers}
+                disabled={answeredCount === 0}
+                title="清空本次所有作答"
+                style={{ padding: '5px 11px', borderRadius: 16, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+              >
+                重置整份
+              </button>
+              <button onClick={handleSubmit} style={{ padding: '7px 20px', borderRadius: 16, background: 'var(--accent)', color: '#fff', border: 'none', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 10px 20px rgba(15,23,42,0.1)', transition: 'transform 0.1s' }}
+                onPointerDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
+                onPointerUp={e => e.currentTarget.style.transform = ''}>
+                完成练习
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -509,21 +679,24 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
           {/* Progress header */}
           <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid var(--line)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', letterSpacing: '0.5px' }}>答题进度</span>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', letterSpacing: '0.5px' }}>{isReviewMode ? '浏览进度' : '答题进度'}</span>
               <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent)', fontFamily: 'monospace' }}>
-                {answeredCount}<span style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}> / {questions.length}</span>
+                {isReviewMode ? currentIndex + 1 : answeredCount}<span style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}> / {questions.length}</span>
               </span>
             </div>
             {/* Progress bar */}
             <div style={{ width: '100%', height: 4, background: 'var(--accent-soft-bg)', borderRadius: 4, overflow: 'hidden' }}>
-              <div style={{ width: `${progressPercent}%`, height: '100%', background: 'var(--accent)', borderRadius: 4, transition: 'width 0.4s ease' }} />
+              <div style={{ width: `${isReviewMode ? Math.round(((currentIndex + 1) / Math.max(1, questions.length)) * 100) : progressPercent}%`, height: '100%', background: 'var(--accent)', borderRadius: 4, transition: 'width 0.4s ease' }} />
             </div>
             <div style={{ marginTop: 7, fontSize: 10, color: 'var(--muted)' }}>
-              {progressPercent}% 已完成 · 用时 <span style={{ color: 'var(--text)', fontWeight: 600, fontFamily: 'monospace' }}>{formatTime(timeElapsed)}</span>
+              {isReviewMode ? '随看随停，不用做完，也不用交卷' : (
+                <>{progressPercent}% 已完成 · 用时 <span style={{ color: 'var(--text)', fontWeight: 600, fontFamily: 'monospace' }}>{formatTime(timeElapsed)}</span></>
+              )}
             </div>
           </div>
 
-          {/* Per-category mini stats */}
+          {/* Per-category mini stats：看题模式不需要统计答题情况 */}
+          {!isReviewMode && (
           <div style={{ padding: '10px 16px 8px', borderBottom: '1px solid var(--line)' }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: 7 }}>分类统计</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -538,19 +711,20 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
               ))}
             </div>
           </div>
+          )}
 
           {/* Answer card — grouped by category */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '10px 16px 16px' }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--muted)', letterSpacing: '0.5px', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 5 }}>
               <Ico d={<><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></>} size={11} sw={1.8} />
-              答题卡
+              {isReviewMode ? '题目目录' : '答题卡'}
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {Object.entries(grouped).map(([cat, qs]) => {
                 const pal = CAT_COLORS[cat] || CAT_COLORS.default;
                 const name = CAT_NAMES[cat] || cat;
-                const doneCnt = qs.filter(q => isAnswered(answers[q.id], q.type)).length;
+                const doneCnt = qs.filter(q => isSubjectiveType(q.type) || isAnswered(answers[q.id], q.type)).length;
                 return (
                   <div key={cat}>
                     {/* Category label */}
@@ -575,6 +749,9 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
                                 boxShadow: '0 8px 18px rgba(15,23,42,0.1)',
                               } : isAnsweredFlag ? {
                                 border: `1px solid ${pal.border}`, background: pal.bg, color: pal.color,
+                              } : isSubjectiveType(q.type) ? {
+                                // 主观题写在纸上，不显示「未答」
+                                border: `1px dashed ${pal.border}`, background: 'var(--surface)', color: pal.color,
                               } : {
                                 border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--muted)',
                               }),
@@ -591,18 +768,22 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
           </div>
 
           {/* Legend */}
+          {!isReviewMode && (
           <div style={{ padding: '10px 16px', borderTop: '1px solid var(--line)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {[
               { label: '未答', border: '1px solid var(--line)', bg: 'var(--surface)' },
               { label: '已答', border: '1px solid var(--accent-border-soft)', bg: 'var(--accent-soft-bg)' },
               { label: '当前', border: '2px solid var(--accent)', bg: 'var(--accent)' },
-            ].map(l => (
+            ].concat(questions.some(q => isSubjectiveType(q.type))
+              ? [{ label: '主观题（纸面）', border: '1px dashed var(--line)', bg: 'var(--surface)' }]
+              : []).map(l => (
               <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ width: 9, height: 9, borderRadius: 2, border: l.border, background: l.bg, flexShrink: 0 }} />
                 <span style={{ fontSize: 10, color: 'var(--muted)' }}>{l.label}</span>
               </div>
             ))}
           </div>
+          )}
         </aside>
 
         {/* ── RIGHT: MAIN AREA ── */}
@@ -635,7 +816,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
                   {currentQuestion.category ? (CAT_NAMES[currentQuestion.category] || currentQuestion.category) : '综合'}
                 </span>
                 <span style={{ fontSize: 10, color: 'var(--muted)', padding: '2px 7px', borderRadius: 5, background: 'var(--neutral-soft-bg)' }}>
-                  {currentQuestion.type === 'single' ? '单选题' : '多选题'}
+                  {isSubjectiveType(currentQuestion.type) ? '主观题' : ({ single: '单选题', multiple: '多选题', judge: '判断题', fill: '填空题' }[currentQuestion.type] || '题目')}
                 </span>
                 {/* Difficulty dots if available */}
                 {currentQuestion.difficulty && (
@@ -670,9 +851,15 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
             {/* ── OPTIONS ── */}
             <div style={{ marginBottom: 4 }}>
               <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--muted)', letterSpacing: '0.8px', marginBottom: 9 }}>
-                作答区域 {currentQuestion.type !== 'single' && <span style={{ color: catPalette.color }}>（可多选）</span>}
+                {isReviewMode
+                  ? '题目与参考答案'
+                  : isSubjectiveType(currentQuestion.type)
+                    ? '主观题 · 写在纸上作答'
+                    : <>作答区域 {currentQuestion.type === 'multiple' && <span style={{ color: catPalette.color }}>（可多选）</span>}</>}
               </div>
-              {renderOptions()}
+              {currentQuestion.type === 'fill' || isSubjectiveType(currentQuestion.type)
+                ? renderTextResponse()
+                : renderOptions()}
             </div>
 
             {/* ── ANALYSIS ── */}

@@ -6,7 +6,23 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <title>OpenExam · AI 智能学习平台</title>
+    <title>StudyStudio · 考研智能学习空间</title>
+    <script>
+      // 在首帧绘制前同步应用题目字体大小（仅缩放题目文字，通过设置 --question-font-scale 变量）
+      (function () {
+        try {
+          var raw = localStorage.getItem('openexam_question_font_scale');
+          if (raw) {
+            var n = parseFloat(raw);
+            if (!isNaN(n)) {
+              if (n < 1) n = 1;
+              if (n > 2) n = 2;
+              document.documentElement.style.setProperty('--question-font-scale', String(n));
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

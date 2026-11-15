@@ -1,28 +1,27 @@
 import React, { useState, useEffect } from 'react';
+import { getRoleSettings, isRoleConfigured } from '../store/aiSettings.js';
+import { useDialog } from '../components/DialogProvider.jsx';
+import PaperList from './PaperList.jsx';
+import PracticeHistory from './PracticeHistory.jsx';
 
 // 分类配置
 const categoryConfig = {
-  yanyu: { name: '言语理解', color: 'var(--category-yanyu)' },
-  shuliang: { name: '数量关系', color: 'var(--category-shuliang)' },
-  panduan: { name: '判断推理', color: 'var(--category-panduan)' },
-  ziliao: { name: '资料分析', color: 'var(--category-ziliao)' },
-  changshi: { name: '常识判断', color: 'var(--category-changshi)' },
+  math: { name: '数学', color: '#2563eb' },
+  english: { name: '英语', color: '#0f766e' },
+  politics: { name: '政治', color: '#b45309' },
+  major: { name: '专业课', color: '#7c3aed' },
 };
 
 // 默认子分类配置
 const defaultSubCategories = {
-  yanyu: ['xuanci', 'yueduan', 'yuju', 'wenzhang'],
-  shuliang: ['jisuan', 'tuili'],
-  panduan: ['tuxing', 'dingyi', 'leibi', 'luoji'],
-  ziliao: ['wenzi', 'biaoge', 'tubiao', 'zonghe', 'zengzhang'],
-  changshi: ['zhengzhi', 'jingji', 'falv', 'keji', 'renwen', 'dili'],
+  math: ['gaoshu', 'daishu', 'gaiilv'],
+  english: ['wanxing', 'yuedu', 'fanyi', 'xiezuo'],
+  politics: ['makesi', 'maogai', 'shixi', 'shiju'],
+  major: ['major'],
 };
 
 const TRACK_LABELS = {
-  gongkao: '考公',
-  shiye: '事业单位',
   kaoyan: '考研',
-  self: '自定义',
 };
 
 // 子分类中文映射
@@ -54,6 +53,9 @@ const subCategoryNames = {
   renwen: '人文',
   dili: '地理',
   gongcheng: '工程问题',
+  gaoshu: '高等数学', daishu: '线性代数', gaiilv: '概率论与数理统计',
+  wanxing: '完形填空', yuedu: '阅读理解', fanyi: '翻译', xiezuo: '英语写作',
+  makesi: '马克思主义基本原理', maogai: '毛中特', shixi: '思想道德与法治', shiju: '形势与政策', major: '专业课综合',
 };
 
 // 简约图标组件
@@ -98,10 +100,23 @@ const Icons = {
 // 检查是否在 Electron 环境
 const isElectron = () => window.openexam?.db;
 
-export default function PracticeModule({ onStartPractice, onImport, onHistory, examTrack = 'gongkao', onGoAIGenerate }) {
+// 页内 tab（内联样式，不改 styles.css）
+const PRACTICE_TABS = [
+  { key: 'subjects', label: '科目浏览' },
+  { key: 'papers', label: '试卷与模拟考' },
+  { key: 'history', label: '练习记录' },
+];
+
+const TAB_BAR_STYLE = {
+  display: 'flex', gap: 4, margin: '0 0 16px', padding: 4,
+  background: 'var(--surface-elevated)', border: '1px solid var(--line)', borderRadius: 10,
+};
+
+export default function PracticeModule({ onStartPractice, onImport, onHistory, onGoAIGenerate, initialTab = 'subjects', onOpenPaper, onReviewPaper, onOpenRecord, initialKeyword = '', focusToken = 0, focusSubject = null }) {
+  const [activeTab, setActiveTab] = useState(initialTab);
+  useEffect(() => { setActiveTab(initialTab); }, [initialTab]);
   const [expandedId, setExpandedId] = useState(null);
   const [modules, setModules] = useState([]);
-  const [stats, setStats] = useState({ totalQuestions: 0, totalDone: 0, accuracy: 0, wrongCount: 0 });
   const [subCategories, setSubCategories] = useState({});
   const [loading, setLoading] = useState(true);
   const [showConfig, setShowConfig] = useState(false);
@@ -113,14 +128,82 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
     durationMinutes: 30,
   });
 
+  // 重新分类：按上传批次重跑「科目/模块/章节/知识点」，避免全库重跑烧 token
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [showReclassify, setShowReclassify] = useState(false);
+  const [batches, setBatches] = useState([]);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [selectedBatchId, setSelectedBatchId] = useState('');
+  const [onlyMissing, setOnlyMissing] = useState(true);
+  const [reclassifying, setReclassifying] = useState(false);
+  const [reclassifyProgress, setReclassifyProgress] = useState({ done: 0, total: 0 });
+  const [reclassifyNotice, setReclassifyNotice] = useState('');
+  // 细粒度重新分类：勾选题目
+  const [reclassifyMode, setReclassifyMode] = useState('paper'); // 'paper' | 'questions'
+  const [questionRows, setQuestionRows] = useState([]);
+  const [questionLoading, setQuestionLoading] = useState(false);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState([]);
+  const reclassifyRequestRef = React.useRef('');
+  const { alert: showAlert } = useDialog();
+
+  // 我的科目 → 该科目下上传的题库文件，点进去直接看题
+  const [subjectPapers, setSubjectPapers] = useState([]);
+  const [expandedSubject, setExpandedSubject] = useState(null);
+  // 从科目内进入时默认只看当前科目，仍可切回全部题库
+  const [showAllPractice, setShowAllPractice] = useState(false);
+  const scopedSubjectId = focusSubject?.id || '';
+  useEffect(() => { setShowAllPractice(false); }, [scopedSubjectId]);
+  const scopePractice = Boolean(scopedSubjectId) && !showAllPractice;
+  const scopedModules = focusSubject?.categoryKey
+    ? modules.filter((mod) => mod.id === focusSubject.categoryKey)
+    : [];
+  const visibleModules = scopePractice ? scopedModules : modules;
+  const visibleSubjectPapers = scopePractice
+    ? subjectPapers.filter((entry) => entry.id === scopedSubjectId)
+    : subjectPapers;
+
+  useEffect(() => {
+    if (!scopedSubjectId || showAllPractice) return;
+    if (subjectPapers.some((entry) => entry.id === scopedSubjectId)) setExpandedSubject(scopedSubjectId);
+  }, [scopedSubjectId, showAllPractice, subjectPapers]);
+
+  useEffect(() => {
+    if (!isElectron() || activeTab !== 'subjects') return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [subjects, papers] = await Promise.all([
+          window.openexam.subject?.list?.() || Promise.resolve([]),
+          window.openexam.db.getPapers(),
+        ]);
+        if (cancelled) return;
+        const list = Array.isArray(subjects) ? subjects : [];
+        const allPapers = Array.isArray(papers) ? papers : [];
+        const rows = list.map((subject) => {
+          const matched = allPapers.filter((paper) => {
+            if (String(paper.subject_id || '') === String(subject.id)) return true;
+            // 预置科目的历史题库没有 subject_id，按分类联动归属
+            return Boolean(subject.categoryKey)
+              && !paper.subject_id
+              && (paper.subject === subject.categoryKey || paper.category === subject.categoryKey);
+          });
+          return {
+            ...subject,
+            papers: matched,
+            questionCount: matched.reduce((sum, p) => sum + (Number(p.question_count) || 0), 0),
+          };
+        }).filter((row) => row.papers.length > 0);
+        setSubjectPapers(rows);
+      } catch (error) {
+        console.error('加载科目题库失败:', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, refreshKey]);
+
   // 加载数据
   useEffect(() => {
     const loadData = async () => {
-      if (examTrack !== 'gongkao') {
-        setModules([]);
-        setLoading(false);
-        return;
-      }
       if (!isElectron()) {
         // 非 Electron 环境，显示所有默认分类
         const defaultModules = Object.entries(categoryConfig).map(([id, cfg]) => ({
@@ -138,7 +221,6 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
       try {
         // 获取分类统计
         const categoryStats = await window.openexam.db.getCategoryStats();
-        const practiceStats = await window.openexam.db.getPracticeStats();
 
         // 合并默认分类和数据库统计，确保所有分类都显示
         const moduleData = Object.entries(categoryConfig).map(([id, cfg]) => {
@@ -149,13 +231,28 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
             color: cfg.color,
             count: dbStat?.total || 0,
             done: dbStat?.done || 0,
+            accuracy: dbStat?.accuracy || 0,
             incomplete: dbStat?.incomplete || 0,
             rawTotal: dbStat?.rawTotal || dbStat?.total || 0,
           };
         });
 
-        setModules(moduleData);
-        setStats(practiceStats);
+        // 自建科目（如「自动控制原理」）作为独立分类列出，不再混进「专业课」
+        const customModules = (Array.isArray(categoryStats) ? categoryStats : [])
+          .filter((cat) => cat?.isCustom)
+          .map((cat, index) => ({
+            id: cat.category,
+            name: cat.label || '自建科目',
+            color: ['#3f8fb0', '#c2685e', '#6f9c4a', '#b07cc6'][index % 4],
+            count: cat.total || 0,
+            done: cat.done || 0,
+            accuracy: cat.accuracy || 0,
+            incomplete: cat.incomplete || 0,
+            rawTotal: cat.rawTotal || cat.total || 0,
+            isCustom: true,
+          }));
+
+        setModules([...moduleData, ...customModules]);
       } catch (err) {
         console.error('加载数据失败:', err);
       }
@@ -163,7 +260,28 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
     };
 
     loadData();
-  }, [examTrack]);
+  }, [refreshKey]);
+
+  // 勾选模式：加载当前选中试卷的题目，供逐题勾选
+  useEffect(() => {
+    if (!showReclassify || reclassifyMode !== 'questions' || !selectedBatchId || !isElectron()) return;
+    let cancelled = false;
+    setQuestionLoading(true);
+    (async () => {
+      try {
+        const rows = await window.openexam.db.getQuestions(selectedBatchId);
+        if (!cancelled) {
+          setQuestionRows(Array.isArray(rows) ? rows : []);
+          setSelectedQuestionIds([]);
+        }
+      } catch (error) {
+        if (!cancelled) setReclassifyNotice(`读取题目失败：${error?.message || error}`);
+      } finally {
+        if (!cancelled) setQuestionLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showReclassify, reclassifyMode, selectedBatchId]);
 
   // 加载子分类
   const loadSubCategories = async (category) => {
@@ -225,51 +343,135 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
     }
   };
 
+  const formatBatchDate = (value) => String(value || '').replace('T', ' ').slice(0, 16) || '未知时间';
+
+  const openReclassify = async () => {
+    setShowReclassify(true);
+    setReclassifyNotice('');
+    setReclassifyProgress({ done: 0, total: 0 });
+    if (!isElectron()) return;
+    setBatchLoading(true);
+    try {
+      const rows = await window.openexam.db.getReclassifyBatches();
+      setBatches(Array.isArray(rows) ? rows : []);
+      setSelectedBatchId((current) => current || rows?.[0]?.id || '');
+    } catch (error) {
+      setReclassifyNotice(`读取上传批次失败：${error?.message || error}`);
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const isQuestionMissing = (row) => {
+    const chapter = String(row.chapter || '').trim();
+    const tags = Array.isArray(row.tags) ? row.tags : String(row.tags || '').split(',').filter(Boolean);
+    // 兜底章节不算已分类，否则「只补缺失」会把它们当成补全过而跳过
+    const fallback = ['其他', '自拟', '未分类', '待分类', '未归类章节'];
+    return !chapter || fallback.includes(chapter) || tags.length === 0;
+  };
+
+  const toggleQuestion = (id) => {
+    setSelectedQuestionIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const toggleAllQuestions = () => {
+    setSelectedQuestionIds((current) => current.length === questionRows.length ? [] : questionRows.map((row) => String(row.id)));
+  };
+
+  // 整卷 / 勾选题目共用同一套进度监听、取消与回写刷新流程
+  const runReclassify = async (invoke, total) => {
+    if (reclassifying) return;
+    if (!isRoleConfigured('assistant')) {
+      await showAlert({ title: '需要先配置 AI', message: '重新分类要调用当前配置的模型，请先到「设置 → AI 模型」完成配置并测试连接。', tone: 'warning' });
+      return;
+    }
+    const requestId = `reclassify_${Date.now()}`;
+    reclassifyRequestRef.current = requestId;
+    setReclassifying(true);
+    setReclassifyNotice('');
+    setReclassifyProgress({ done: 0, total: Number(total) || 0 });
+    const off = window.openexam.ai?.onReclassifyProgress?.((payload) => {
+      if (!payload || payload.requestId !== requestId) return;
+      setReclassifyProgress({ done: Number(payload.done) || 0, total: Number(payload.total) || 0 });
+    });
+    try {
+      const result = await invoke(requestId);
+      if (result?.error) {
+        setReclassifyNotice(result.error);
+      } else if (!result?.total) {
+        setReclassifyNotice('所选题目已经都有章节和知识点，没有需要重新分类的题目。');
+      } else {
+        setReclassifyNotice(`完成：写入 ${Number(result.changed || 0)} 道${result.skipped ? ` · 跳过 ${result.skipped} 道（无法判断）` : ''}${result.failed ? ` · ${result.failed} 个批次失败` : ''}${result.cancelled ? ' · 已中途停止' : ''}。`);
+      }
+      setRefreshKey((key) => key + 1);
+      const rows = await window.openexam.db.getReclassifyBatches();
+      setBatches(Array.isArray(rows) ? rows : []);
+      if (reclassifyMode === 'questions' && selectedBatchId) {
+        const fresh = await window.openexam.db.getQuestions(selectedBatchId);
+        setQuestionRows(Array.isArray(fresh) ? fresh : []);
+        setSelectedQuestionIds([]);
+      }
+    } catch (error) {
+      setReclassifyNotice(`重新分类失败：${error?.message || error}`);
+    } finally {
+      off?.();
+      reclassifyRequestRef.current = '';
+      setReclassifying(false);
+    }
+  };
+
+  const startReclassify = () => runReclassify(
+    (requestId) => window.openexam.ai.reclassifyPaper(getRoleSettings('assistant'), selectedBatchId, { onlyMissing }, requestId),
+    batches.find((batch) => batch.id === selectedBatchId)?.total || 0
+  );
+
+  const startReclassifySelected = () => {
+    if (!selectedQuestionIds.length) return;
+    return runReclassify(
+      (requestId) => window.openexam.ai.reclassifyQuestions(getRoleSettings('assistant'), selectedQuestionIds, { onlyMissing }, requestId),
+      selectedQuestionIds.length
+    );
+  };
+
+  const stopReclassify = () => {
+    const requestId = reclassifyRequestRef.current;
+    if (requestId) window.openexam.ai?.cancelRecognition?.(requestId);
+  };
+
   if (loading) {
     return <div className="practice-page"><div className="loading-state">加载中...</div></div>;
   }
 
-  if (examTrack !== 'gongkao') {
-    return (
-      <div className="practice-page">
-        <div className="empty-state" style={{ gap: 12, maxWidth: 420, margin: '60px auto', textAlign: 'center' }}>
-          <p style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>当前类目（{TRACK_LABELS[examTrack] || examTrack}）暂无内置专项题库</p>
-          <span style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7 }}>一键去 AI 出卷，生成后会出现在「模拟考试 / AI 出卷」里，可直接开练。</span>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', marginTop: 8 }}>
-            <button className="summary-btn" onClick={() => onGoAIGenerate?.()}>一键 AI 出卷</button>
-            <button className="summary-btn outline" onClick={() => onImport?.()}>导入试卷</button>
-            <button className="summary-btn outline" onClick={() => onHistory?.()}>练习历史</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   const totalCount = modules.reduce((sum, m) => sum + m.count, 0);
-  const totalDone = modules.reduce((sum, m) => sum + m.done, 0);
 
   return (
     <div className="practice-page">
-      {/* 顶部统计 */}
+      {/* 页内 tab：科目浏览 / 试卷与模拟考 / 练习记录 */}
+      <div style={TAB_BAR_STYLE}>
+        {PRACTICE_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setActiveTab(tab.key)}
+            style={{
+              flex: 1, height: 34, borderRadius: 7, border: 'none', cursor: 'pointer',
+              fontSize: 13, fontWeight: 600,
+              background: activeTab === tab.key ? 'var(--accent)' : 'transparent',
+              color: activeTab === tab.key ? '#fff' : 'var(--muted)',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'subjects' && (
+        <>
+      {/* 顶部：只显示题量，不再堆一排总览数字；每个科目自己的题数 / 已写 / 正确率在下方列表里看 */}
       <div className="practice-summary">
         <div className="summary-item">
           <span className="summary-value">{totalCount.toLocaleString()}</span>
-          <span className="summary-label">题库总量</span>
-        </div>
-        <div className="summary-divider" />
-        <div className="summary-item">
-          <span className="summary-value">{totalDone.toLocaleString()}</span>
-          <span className="summary-label">已练习</span>
-        </div>
-        <div className="summary-divider" />
-        <div className="summary-item">
-          <span className="summary-value">{totalCount > 0 ? Math.round(totalDone / totalCount * 100) : 0}%</span>
-          <span className="summary-label">完成度</span>
-        </div>
-        <div className="summary-divider" />
-        <div className="summary-item">
-          <span className="summary-value">{stats.accuracy}%</span>
-          <span className="summary-label">正确率</span>
+          <span className="summary-label">题库共多少题</span>
         </div>
         <div className="summary-actions">
           <button className="summary-btn outline" onClick={openConfig}>
@@ -278,11 +480,18 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
             </svg>
             练习设置
           </button>
-          <button className="summary-btn outline" onClick={() => onHistory?.()}>
+          <button className="summary-btn outline" onClick={() => setActiveTab('history')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
             </svg>
             练习历史
+          </button>
+          <button className="summary-btn outline" onClick={openReclassify} title="按上传批次重跑科目/章节/知识点分类">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+              <path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+            </svg>
+            重新分类
           </button>
           <button className="summary-btn" onClick={() => onImport?.()}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -293,7 +502,16 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
         </div>
       </div>
 
-      {modules.some((mod) => mod.id === 'ziliao' && mod.incomplete > 0) && (
+      {focusSubject ? (
+        <div className="practice-scope-note">
+          <span>当前科目：<strong>{focusSubject.name}</strong>{scopePractice ? ' · 题库练习已按该科目筛选' : ' · 正在查看全部题库'}</span>
+          <button type="button" className="practice-scope-link" onClick={() => setShowAllPractice((value) => !value)}>
+            {showAllPractice ? '只看当前科目' : '查看全部题库'}
+          </button>
+        </div>
+      ) : null}
+
+      {visibleModules.some((mod) => mod.id === 'ziliao' && mod.incomplete > 0) && (
         <div className="practice-quality-notice" style={{
           margin: '0 0 12px',
           padding: '10px 12px',
@@ -315,12 +533,14 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
 
       {/* 模块列表 */}
       <div className="practice-list">
-        {modules.length === 0 ? (
-          <div className="empty-state">
-            <p>暂无题目数据</p>
-          </div>
+        {visibleModules.length === 0 ? (
+          scopePractice && visibleSubjectPapers.length > 0 ? null : (
+            <div className="empty-state">
+              <p>{scopePractice ? '当前科目暂无专项练习题目' : '暂无题目数据'}</p>
+            </div>
+          )
         ) : (
-          modules.map(mod => {
+          visibleModules.map(mod => {
             const Icon = Icons[mod.id] || Icons.default;
             const isExpanded = expandedId === mod.id;
             const progress = mod.count > 0 ? Math.round(mod.done / mod.count * 100) : 0;
@@ -343,7 +563,9 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
                         </>
                       ) : null}
                       <span className="meta-dot">·</span>
-                      <span>已做 {mod.done}</span>
+                      <span>已写 {mod.done}</span>
+                      <span className="meta-dot">·</span>
+                      <span style={{ color: mod.done > 0 ? 'var(--accent)' : undefined }}>正确率 {mod.accuracy}%</span>
                     </div>
                   </div>
                   <div className="practice-progress">
@@ -385,6 +607,80 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
           })
         )}
       </div>
+
+      {/* 我的科目 · 已上传题库：科目是独立分组，下面直接列题文件，点「看题」进试卷 */}
+      {visibleSubjectPapers.length > 0 && (
+        <div style={{ marginTop: 22 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '0 0 10px' }}>
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>
+              {scopePractice && focusSubject ? `${focusSubject.name} · 已上传题库` : '我的科目 · 已上传题库'}
+            </h3>
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>点开科目看该科目下的题文件，可直接看题</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {visibleSubjectPapers.map((entry) => {
+              const open = expandedSubject === entry.id;
+              return (
+                <div key={entry.id} style={{ border: '1px solid var(--line)', borderRadius: 10, background: 'var(--surface-elevated)', overflow: 'hidden' }}>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedSubject(open ? null : entry.id)}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', color: 'var(--text)' }}
+                  >
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{entry.name}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>{entry.papers.length} 卷 / {entry.questionCount} 题</span>
+                    <span style={{ marginLeft: 'auto', color: 'var(--muted)', fontSize: 12 }}>{open ? '收起 ▴' : '展开 ▾'}</span>
+                  </button>
+                  {open && (
+                    <div style={{ borderTop: '1px solid var(--line)', padding: '6px 12px 10px' }}>
+                      {entry.papers.map((paper) => (
+                        <div key={paper.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0' }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{paper.title || '未命名试卷'}</span>
+                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>{Number(paper.question_count) || 0} 题</span>
+                          <button
+                            type="button"
+                            className="summary-btn outline"
+                            style={{ height: 26, padding: '0 10px', fontSize: 11 }}
+                            onClick={() => onOpenPaper?.(paper.id)}
+                          >
+                            看题
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {scopePractice && visibleSubjectPapers.length === 0 ? (
+        <div className="practice-scope-empty">
+          当前科目还没有已上传的题库。可切到「资料」标签上传主教材，或在「查看全部题库」里浏览其他科目。
+        </div>
+      ) : null}
+        </>
+      )}
+
+      {activeTab === 'papers' && (
+        <PaperList
+          embedded
+          onOpenPaper={onOpenPaper}
+          onReviewPaper={onReviewPaper}
+          initialKeyword={initialKeyword}
+          focusToken={focusToken}
+          onGoAIGenerate={onGoAIGenerate}
+        />
+      )}
+
+      {activeTab === 'history' && (
+        <PracticeHistory
+          onBack={() => setActiveTab('subjects')}
+          onOpenRecord={onOpenRecord}
+        />
+      )}
 
       {/* 练习配置弹窗 */}
       {showConfig && (
@@ -479,6 +775,136 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, e
             <div className="config-actions">
               <button className="btn-secondary" onClick={() => setShowConfig(false)}>取消</button>
               <button className="btn-primary" onClick={saveConfig}>保存设置</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 重新分类弹窗：整卷（按上传批次）或勾选题目 */}
+      {showReclassify && (
+        <div className="config-overlay" onClick={() => { if (!reclassifying) setShowReclassify(false); }}>
+          <div className="config-modal reclassify-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>重新分类题库</h3>
+
+            <div style={{ display: 'flex', gap: 6, margin: '0 0 10px' }}>
+              <button
+                type="button"
+                onClick={() => setReclassifyMode('paper')}
+                disabled={reclassifying}
+                style={{
+                  flex: 1, height: 30, borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                  border: '1px solid var(--line)',
+                  background: reclassifyMode === 'paper' ? 'var(--accent)' : 'var(--surface-elevated)',
+                  color: reclassifyMode === 'paper' ? '#fff' : 'var(--muted)',
+                }}
+              >整个题文件重新分类</button>
+              <button
+                type="button"
+                onClick={() => setReclassifyMode('questions')}
+                disabled={reclassifying}
+                style={{
+                  flex: 1, height: 30, borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                  border: '1px solid var(--line)',
+                  background: reclassifyMode === 'questions' ? 'var(--accent)' : 'var(--surface-elevated)',
+                  color: reclassifyMode === 'questions' ? '#fff' : 'var(--muted)',
+                }}
+              >勾选题目重新分类</button>
+            </div>
+
+            <p className="reclassify-desc">
+              {reclassifyMode === 'paper'
+                ? '只重跑「科目 → 模块 → 章节 → 知识点」四级分类，不改题干和答案。选一个上传批次可以精确控制 token 消耗，重新分类后知识图谱会按新层级重排。'
+                : '先选一份试卷，再勾选具体题目，只重跑这些题目的「科目 → 模块 → 章节 → 知识点」四级分类，不改题干和答案，最省 token。'}
+            </p>
+
+            <div className="reclassify-batches">
+              {batchLoading && <div className="reclassify-empty">正在读取上传批次...</div>}
+              {!batchLoading && batches.length === 0 && <div className="reclassify-empty">还没有可分类的题目，先去「导入试卷」上传一份吧。</div>}
+              {!batchLoading && batches.map((batch) => {
+                const active = selectedBatchId === batch.id;
+                return (
+                  <button
+                    key={batch.id}
+                    type="button"
+                    className={`reclassify-batch ${active ? 'active' : ''}`}
+                    onClick={() => setSelectedBatchId(batch.id)}
+                    disabled={reclassifying}
+                  >
+                    <div className="reclassify-batch-main">
+                      <span className="reclassify-batch-name">{batch.title}</span>
+                      <span className="reclassify-batch-meta">{batch.total} 题 · {formatBatchDate(batch.createdAt)}</span>
+                    </div>
+                    <span className={`reclassify-batch-tag ${batch.pending > 0 ? 'is-pending' : ''}`}>
+                      {batch.pending > 0 ? `待分类 ${batch.pending}` : '已分类'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {reclassifyMode === 'questions' && (
+              <div style={{ margin: '10px 0', border: '1px solid var(--line)', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--surface-elevated)', fontSize: 12 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text)' }}>
+                    <input type="checkbox" checked={questionRows.length > 0 && selectedQuestionIds.length === questionRows.length} onChange={toggleAllQuestions} disabled={reclassifying || !questionRows.length} />
+                    全选
+                  </label>
+                  <span style={{ color: 'var(--muted)' }}>已选 {selectedQuestionIds.length} / {questionRows.length} 题</span>
+                </div>
+                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                  {questionLoading && <div className="reclassify-empty">正在读取题目...</div>}
+                  {!questionLoading && !selectedBatchId && <div className="reclassify-empty">请先在上方选择一份试卷。</div>}
+                  {!questionLoading && selectedBatchId && questionRows.length === 0 && <div className="reclassify-empty">这份试卷暂无题目。</div>}
+                  {!questionLoading && questionRows.map((row, index) => (
+                    <label
+                      key={row.id}
+                      style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '7px 10px', borderTop: '1px solid var(--line)', cursor: 'pointer', fontSize: 12 }}
+                    >
+                      <input type="checkbox" checked={selectedQuestionIds.includes(String(row.id))} onChange={() => toggleQuestion(String(row.id))} disabled={reclassifying} />
+                      <span style={{ flex: 1, color: 'var(--text)', lineHeight: 1.45 }}>
+                        <span style={{ color: 'var(--muted)', marginRight: 6 }}>#{index + 1}</span>
+                        {String(row.content || '').replace(/\s+/g, ' ').slice(0, 88) || '（无题干）'}
+                      </span>
+                      <span style={{ color: isQuestionMissing(row) ? 'var(--warning)' : 'var(--muted)', whiteSpace: 'nowrap' }}>
+                        {isQuestionMissing(row) ? '待分类' : '已分类'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <label className="import-check-row">
+              <input type="checkbox" checked={onlyMissing} onChange={(event) => setOnlyMissing(event.target.checked)} disabled={reclassifying} />
+              <span>只处理缺少章节/知识点的题（最省 token；取消勾选会覆盖已有分类）</span>
+            </label>
+
+            {(reclassifying || reclassifyProgress.total > 0) && (
+              <div className="reclassify-progress">
+                <div className="reclassify-progress-bar">
+                  <div style={{ width: `${reclassifyProgress.total ? Math.round((reclassifyProgress.done / reclassifyProgress.total) * 100) : 0}%` }} />
+                </div>
+                <span>{reclassifyProgress.done} / {reclassifyProgress.total} 道</span>
+              </div>
+            )}
+
+            {reclassifyNotice && <p className="reclassify-notice">{reclassifyNotice}</p>}
+
+            <div className="config-actions">
+              <button className="btn-secondary" onClick={() => setShowReclassify(false)} disabled={reclassifying}>
+                {reclassifying ? '后台继续（关闭）' : '取消'}
+              </button>
+              {reclassifying ? (
+                <button className="btn-primary" onClick={stopReclassify}>停止</button>
+              ) : reclassifyMode === 'paper' ? (
+                <button className="btn-primary" onClick={startReclassify} disabled={!selectedBatchId || batchLoading}>
+                  开始重新分类
+                </button>
+              ) : (
+                <button className="btn-primary" onClick={startReclassifySelected} disabled={!selectedQuestionIds.length || questionLoading}>
+                  重新分类选中题目
+                </button>
+              )}
             </div>
           </div>
         </div>

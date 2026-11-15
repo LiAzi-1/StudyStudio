@@ -1,42 +1,26 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Today from "./pages/Today.jsx";
 import Notes from "./pages/Notes.jsx";
-import Essay from "./pages/Essay.jsx";
-import PaperList from "./pages/PaperList.jsx";
-import PracticeModule from "./pages/PracticeModule.jsx";
 import PracticeHistory from "./pages/PracticeHistory.jsx";
 import ExamRoom from "./pages/ExamRoom.jsx";
 import ExamResult from "./pages/ExamResult.jsx";
 import ImportPaper from "./pages/ImportPaper.jsx";
+import Subjects from "./pages/Subjects.jsx";
+import Library from "./pages/Library.jsx";
 import Settings from "./pages/Settings.jsx";
-import AITeacher from "./pages/AITeacher.jsx";
+import AIHub from "./pages/AIHub.jsx";
 import AIGenerate from "./pages/AIGenerate.jsx";
 import WrongBook from "./pages/WrongBook.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import GrowthCenter from "./pages/GrowthCenter.jsx";
 import AchievementCenter from "./pages/AchievementCenter.jsx";
 import OnboardingTour from "./components/OnboardingTour.jsx";
-import CustomSelect from "./components/CustomSelect.jsx";
+import ImportTaskDock from "./components/ImportTaskDock.jsx";
 import { actions, getState } from "./store/examStore.js";
 import { normalizeAISettings } from "./store/aiSettings.js";
-import appLogo from "./assets/openexam-logo.png";
+import { initImportTasks } from "./store/importTasks.js";
+import appLogo from "./assets/openexam-app-icon.png";
 import { useDialog } from "./components/DialogProvider.jsx";
-
-const EXAM_TRACK_STORAGE_KEY = "openexam_exam_track_v1";
-const EXAM_TRACK_SETTING_KEY = "exam_track";
-const EXAM_TRACK_OPTIONS = [
-  { key: "gongkao", label: "公务员" },
-  { key: "shiye", label: "事业单位" },
-];
-
-function normalizeExamTrack(input) {
-  const track = String(input || "").trim();
-  return EXAM_TRACK_OPTIONS.some((item) => item.key === track) ? track : "gongkao";
-}
-
-function getExamTrackLabel(track) {
-  return EXAM_TRACK_OPTIONS.find((item) => item.key === track)?.label || "公务员";
-}
 
 function PageView({ fullscreen = false, children, className = "" }) {
   return (
@@ -203,33 +187,38 @@ const DynamicChart = ({ data, onHover }) => {
 };
 
 
-export default function App() {
+function App() {
+  return <AppMain />;
+}
+
+export default App;
+
+function AppMain() {
   const ONBOARDING_STORAGE_KEY = "openexam_onboarding_done_v1";
   const [theme, setTheme] = useState("light");
-  const [page, setPage] = useState("today");
-  const [examTrack, setExamTrack] = useState(() => {
-    try {
-      return normalizeExamTrack(localStorage.getItem(EXAM_TRACK_STORAGE_KEY));
-    } catch (error) {
-      return "gongkao";
-    }
-  });
+  const [page, setPageRaw] = useState("today");
+  // 后台导入完成时用它判断用户是否还停留在导入页，避免打断其它界面
+  const pageRef = useRef(page);
   const [currentPaperId, setCurrentPaperId] = useState(null);
   const [examResult, setExamResult] = useState(null);
-  const [resultReturnPage, setResultReturnPage] = useState("papers");
+  const [resultReturnPage, setResultReturnPage] = useState("practice");
   const [activeTab, setActiveTab] = useState("今日");
   const [practiceQuestions, setPracticeQuestions] = useState(null); // 专项练习题目
   const [practiceConfig, setPracticeConfig] = useState(null); // 练习配置
   const [examResumeRecord, setExamResumeRecord] = useState(null);
   const [paperSearchKeyword, setPaperSearchKeyword] = useState("");
   const [paperSearchFocusToken, setPaperSearchFocusToken] = useState(0);
+  // 题库练习默认落在「科目浏览」；从顶部搜索进入时直接展开「试卷与模拟考」
+  const [practiceView, setPracticeView] = useState("subjects");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [assistantSubjectId, setAssistantSubjectId] = useState("");
+  const [materialsSubjectId, setMaterialsSubjectId] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingClosing, setOnboardingClosing] = useState(false);
   const [appRevealActive, setAppRevealActive] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [profile, setProfile] = useState({ name: "考生用户" });
-  const [examTrackLoaded, setExamTrackLoaded] = useState(false);
+  const [profile, setProfile] = useState({ name: "考生用户", avatar: "" });
+  const [settingsSection, setSettingsSection] = useState("ai");
   const userMenuRef = useRef(null);
   const onboardingCloseTimerRef = useRef(null);
   const appRevealTimerRef = useRef(null);
@@ -238,6 +227,12 @@ export default function App() {
   const avatarLetter = Array.from(displayName)[0] || "考";
   const { alert: showAlert, confirm: showConfirm } = useDialog();
 
+  // 导入任务在常驻页面里继续跑，切到别的界面不再中断识别
+  const setPage = (nextPage) => {
+    pageRef.current = nextPage;
+    setPageRaw(nextPage);
+  };
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     if (window.openexam?.setTheme) {
@@ -245,59 +240,8 @@ export default function App() {
     }
   }, [theme]);
 
-  useEffect(() => {
-    let mounted = true;
-    const loadExamTrack = async () => {
-      try {
-        if (window.openexam?.db?.getAppSetting) {
-          const record = await window.openexam.db.getAppSetting(EXAM_TRACK_SETTING_KEY);
-          if (mounted && record?.value) {
-            setExamTrack(normalizeExamTrack(record.value));
-            setExamTrackLoaded(true);
-            return;
-          }
-        }
-      } catch (error) {
-        console.error("读取类目配置失败:", error);
-      }
-
-      try {
-        const legacyTrack = normalizeExamTrack(localStorage.getItem(EXAM_TRACK_STORAGE_KEY));
-        if (mounted) setExamTrack(legacyTrack);
-        if (window.openexam?.db?.setAppSetting) {
-          await window.openexam.db.setAppSetting(EXAM_TRACK_SETTING_KEY, legacyTrack);
-        }
-      } catch (error) {
-        console.error("迁移类目配置失败:", error);
-      } finally {
-        if (mounted) setExamTrackLoaded(true);
-      }
-    };
-    loadExamTrack();
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!examTrackLoaded) return;
-    const persistExamTrack = async () => {
-      try {
-        if (window.openexam?.db?.setAppSetting) {
-          await window.openexam.db.setAppSetting(EXAM_TRACK_SETTING_KEY, examTrack);
-          return;
-        }
-      } catch (error) {
-        console.error("保存类目配置失败:", error);
-      }
-      try {
-        localStorage.setItem(EXAM_TRACK_STORAGE_KEY, examTrack);
-      } catch (error) {
-        // ignore storage failures
-      }
-    };
-    persistExamTrack();
-  }, [examTrack, examTrackLoaded]);
+  // 上传记录在任何页面都要能读到，包括全屏考试页
+  useEffect(() => { initImportTasks(); }, []);
 
   useEffect(() => {
     const syncAISettingsFromSQLite = async () => {
@@ -322,7 +266,10 @@ export default function App() {
         if (!window.openexam?.app?.getProfile) return;
         const result = await window.openexam.app.getProfile();
         if (mounted && result && typeof result === "object") {
-          setProfile({ name: String(result.name || "考生用户") || "考生用户" });
+          setProfile({
+            name: String(result.name || "考生用户") || "考生用户",
+            avatar: typeof result.avatar === "string" ? result.avatar : "",
+          });
         }
       } catch (error) {
         console.error("读取用户信息失败:", error);
@@ -369,7 +316,7 @@ export default function App() {
       updatePromptedVersionRef.current = version;
       const confirmed = await showConfirm({
         title: '更新已就绪',
-        message: `OpenExam ${payload.latestVersion || ''} 已下载完成，是否现在重启安装？`.trim(),
+        message: `StudyStudio ${payload.latestVersion || ''} 已下载完成，是否现在重启安装？`.trim(),
         confirmText: '立即安装',
         cancelText: '稍后',
         tone: 'success',
@@ -394,7 +341,7 @@ export default function App() {
     if (onboardingClosing) return;
     const nextName = String(payload?.name || displayName).trim() || "考生用户";
 
-    setProfile({ name: nextName });
+    setProfile((prev) => ({ ...prev, name: nextName }));
 
     try {
       localStorage.setItem(ONBOARDING_STORAGE_KEY, "1");
@@ -419,7 +366,7 @@ export default function App() {
 
     try {
       if (window.openexam?.app?.saveProfile) {
-        const result = await window.openexam.app.saveProfile({ name: nextName });
+        const result = await window.openexam.app.saveProfile({ name: nextName, avatar: profile.avatar });
         if (result?.profile) {
           setProfile(result.profile);
         }
@@ -429,8 +376,12 @@ export default function App() {
     }
   };
 
-  const handleOnboardingNavigate = ({ page: targetPage, tab }) => {
-    if (tab !== undefined) setActiveTab(tab);
+  const handleProfileSaved = (next) => {
+    if (!next || typeof next !== "object") return;
+    setProfile((prev) => ({ ...prev, ...next }));
+  };
+
+  const handleOnboardingNavigate = ({ page: targetPage, tab }) => {    if (tab !== undefined) setActiveTab(tab);
     if (targetPage) setPage(targetPage);
   };
 
@@ -438,8 +389,7 @@ export default function App() {
     <OnboardingTour
       open={showOnboarding}
       closing={onboardingClosing}
-      defaultName={displayName}
-      onFinish={finishOnboarding}
+      onFinish={() => finishOnboarding({ name: displayName })}
       onSkip={() => finishOnboarding({ name: displayName })}
       onNavigate={handleOnboardingNavigate}
     />
@@ -453,7 +403,6 @@ export default function App() {
 
   const getReturnTab = (targetPage) => ({
     practice: "题库练习",
-    papers: "模拟考试",
     "ai-generate": "AI出卷",
     "wrong-book": "",
     home: "学习中心",
@@ -532,6 +481,7 @@ export default function App() {
   const goAskAI = (question, extra = {}) => {
     writeAIContext(question, extra);
     setActiveTab('');
+    setAiTab('teacher');
     setPage('ai-teacher');
   };
 
@@ -541,12 +491,42 @@ export default function App() {
     setCurrentPaperId(paperId);
     setPracticeConfig(options.mock ? {
       mode: 'mock',
-      title: options.title || '模拟考试',
+      title: options.title || '整卷练习',
       sourcePaperId: paperId,
       durationMinutes: Number(options.durationMinutes || 120),
     } : { sourcePaperId: paperId, title: options.title || '' });
-    setResultReturnPage(options.returnPage || "papers");
+    setResultReturnPage(options.returnPage || "practice");
     setPage("exam");
+  };
+
+  // 看题模式：只读浏览题干、答案与解析，不计时、不交卷、不要求做完
+  const handleOpenReview = async (paperId, title = '') => {
+    const id = String(paperId || '').trim();
+    if (!id) return;
+    try {
+      const ok = await actions.startExam(id);
+      if (ok === false) {
+        await showAlert({ title: '无法打开试卷', message: '这份试卷已不存在或没有题目。', tone: 'warning' });
+        return;
+      }
+    } catch (err) {
+      await showAlert({ title: '无法打开试卷', message: err?.message || '读取题目失败。', tone: 'danger' });
+      return;
+    }
+    setActiveTab('题库练习');
+    setExamResumeRecord(null);
+    setCurrentPaperId(id);
+    setPracticeConfig({ mode: 'review', title: title || '看题', sourcePaperId: id });
+    setResultReturnPage('practice');
+    setPage('exam');
+  };
+
+  // 后台任务入库完成：仍停留在导入页就直接打开看题；切走了只留在上传记录里
+  const handleImportComplete = (payload = {}) => {
+    setActiveTab('题库练习');
+    const paperId = String(payload?.paperId || '').trim();
+    if (!paperId || pageRef.current !== 'import') return;
+    handleOpenReview(paperId, payload?.title || payload?.fileName || '导入试卷');
   };
 
   const handleStartSavedPractice = async (paperId, paperTitle, returnPage = "practice", resumeRecord = null) => {
@@ -572,7 +552,7 @@ export default function App() {
     }
   };
 
-  const handleOpenPaper = async (paper, returnPage = "papers") => {
+  const handleOpenPaper = async (paper, returnPage = "practice") => {
     const target = paper && typeof paper === 'object' ? paper : { id: paper };
     if (!target?.id) return;
     let resumeRecord = target.resumeRecord || null;
@@ -607,6 +587,8 @@ export default function App() {
   };
 
   const handleFinishExam = (result) => {
+    // 每日一练的完成状态由 practice_records 同步（见 savePracticeRecord），
+    // 待自评的练习不能在这里直接标完成。
     setExamResumeRecord(null);
     setExamResult(result);
     setPage("result");
@@ -678,6 +660,49 @@ export default function App() {
     }
   };
 
+  // 知识图谱底层节点 → 该知识点下的题目，直接进练习
+  const handleStartKnowledgePractice = async (node) => {
+    if (!node?.category) {
+      await showAlert({ title: '无法定位题目', message: '这个节点没有关联到具体科目。', tone: 'warning' });
+      return;
+    }
+    if (!window.openexam?.db?.getQuestionsByKnowledge) {
+      await showAlert({ title: '无法开始练习', message: '数据库未连接，请稍后重试。', tone: 'warning' });
+      return;
+    }
+    try {
+      const questions = await window.openexam.db.getQuestionsByKnowledge({
+        category: node.category,
+        subCategory: node.subCategory || '',
+        chapter: node.chapter || '',
+        point: node.point || '',
+        limit: 120,
+      });
+      if (!questions.length) {
+        await showAlert({ title: '暂无题目', message: `「${node.label}」下还没有可练习的题目。`, tone: 'info' });
+        return;
+      }
+      const scope = [node.chapter, node.point].filter(Boolean).join(' · ') || node.label || node.category;
+      setPracticeQuestions(questions);
+      setPracticeConfig({
+        mode: 'practice',
+        category: node.category,
+        subCategory: node.subCategory || 'all',
+        sourcePaperId: `kg_${String(node.id || node.label || 'node').replace(/[^\w:-]/g, '_')}`.slice(0, 120),
+        title: `知识点练习 · ${scope}`,
+        questionCount: questions.length,
+        shuffle: false,
+        durationMinutes: Math.max(10, Math.ceil(questions.length * 1.2)),
+      });
+      setExamResumeRecord(null);
+      setResultReturnPage('home');
+      setPage('practice-exam');
+    } catch (err) {
+      console.error('按知识点取题失败:', err);
+      await showAlert({ title: '加载题目失败', message: '题目读取异常，请稍后重试。', tone: 'danger' });
+    }
+  };
+
   const handleStartWrongRedo = async (questions, meta = {}) => {
     if (!Array.isArray(questions) || questions.length === 0) {
       await showAlert({ title: '暂无可重做题目', message: '当前筛选下没有可重做的错题。', tone: 'info' });
@@ -686,23 +711,108 @@ export default function App() {
     setPracticeQuestions(questions);
     setPracticeConfig({
       mode: 'wrong-redo',
-      title: `错题重做（${questions.length}题）`,
+      title: meta.title || `错题重做（${questions.length}题）`,
       category: 'wrong-book',
       sourcePaperId: `wrong_redo_${meta.filter || 'all'}`,
       filter: meta.filter || 'all',
     });
     setExamResumeRecord(null);
-    setResultReturnPage("wrong-book");
+    setResultReturnPage(meta.returnPage || "wrong-book");
     setPage("practice-exam");
   };
 
-  const handleOpenPracticeRecord = async (record) => {
+  // 今日复习队列 → 按科目分组直接进入错题重做
+  const handleStartTodayReview = async (items, group = {}) => {
+    const rows = Array.isArray(items) ? items : [];
+    const seen = new Set();
+    const questions = rows.map((item, index) => {
+      const questionId = String(item.question_id || item.id || `today_review_${index}`);
+      if (seen.has(questionId)) return null;
+      seen.add(questionId);
+      return {
+        id: questionId,
+        type: item.type || 'single',
+        category: item.category || '',
+        sub_category: item.sub_category || '',
+        content: item.content || '',
+        content_html: item.content_html || '',
+        options: Array.isArray(item.options) ? item.options : [],
+        answer: item.answer || item.correct_answer || '',
+        analysis: item.analysis || '',
+        analysis_html: item.analysis_html || '',
+        paper_id: item.paper_id || null,
+      };
+    }).filter((item) => item && item.content && item.answer && item.options.length > 0);
+
+    if (!questions.length) {
+      await showAlert({
+        title: '暂无可重做题目',
+        message: '这组到期复习里是图片题或缺少选项的题，请到错题本里对照复习。',
+        tone: 'info',
+      });
+      return;
+    }
+    await handleStartWrongRedo(questions, {
+      filter: 'today-due',
+      returnPage: 'today',
+      title: `今日复习 · ${group.label || '错题'}`,
+    });
+  };
+
+  // 每日一练：当天固定题组，若已有未完成记录则直接续做
+  const handleStartDailyPractice = async (category) => {
+    if (!window.openexam?.dailyPractice?.ensure || !window.openexam?.db?.getQuestionsByIds) {
+      await showAlert({ title: '无法开始', message: '数据库未连接，请稍后重试。', tone: 'warning' });
+      return;
+    }
+    try {
+      const data = await window.openexam.dailyPractice.ensure({ category });
+      if (String(data?.record?.status || '').toLowerCase() === 'awaiting_review') {
+        await handleOpenPracticeRecord(data.record, 'today');
+        return;
+      }
+      const set = data?.set;
+      const ids = Array.isArray(set?.questionIds) ? set.questionIds : [];
+      if (!ids.length) {
+        await showAlert({ title: '暂无题目', message: '今天的每日一练还没有可用题目。', tone: 'info' });
+        return;
+      }
+      const loaded = await window.openexam.db.getQuestionsByIds(ids);
+      const byId = new Map((loaded || []).map((q) => [q.id, q]));
+      const questions = ids.map((id) => byId.get(id)).filter(Boolean);
+      if (!questions.length) {
+        await showAlert({ title: '题目已失效', message: '今天的题目已不可用，请明天再试。', tone: 'warning' });
+        return;
+      }
+      const sessionKey = set.sessionKey || `daily_${set.date}`;
+      let resumeRecord = null;
+      try { resumeRecord = await findResumableRecord(sessionKey); } catch (error) { console.error('加载每日一练进度失败:', error); }
+      setPracticeQuestions(questions);
+      setPracticeConfig({
+        mode: 'daily',
+        title: `每日一练 · ${set.categoryLabel || '今日'}`,
+        category: set.category,
+        sourcePaperId: sessionKey,
+        dailyDate: set.date,
+        questionCount: questions.length,
+        durationMinutes: Math.max(10, Math.ceil(questions.length * 1.5)),
+      });
+      setExamResumeRecord(resumeRecord);
+      setResultReturnPage('today');
+      setPage('practice-exam');
+    } catch (error) {
+      console.error('开始每日一练失败:', error);
+      await showAlert({ title: '无法开始每日一练', message: error?.message || '题目读取异常，请稍后重试。', tone: 'danger' });
+    }
+  };
+
+  const handleOpenPracticeRecord = async (record, returnPage = 'history') => {
     if (!record) return;
     const status = String(record.status || '').toLowerCase();
     const meta = record.meta || {};
     if (['ongoing', 'paused'].includes(status)) {
       if (record.paper_id && !String(record.paper_id).startsWith('practice_') && !String(record.paper_id).startsWith('wrong_redo_')) {
-        await handleOpenPaper({ id: record.paper_id, title: record.paper_title, type: meta.mode === 'ai_practice' ? 'ai_practice' : undefined, resumeRecord: record }, 'history');
+        await handleOpenPaper({ id: record.paper_id, title: record.paper_title, type: meta.mode === 'ai_practice' ? 'ai_practice' : undefined, resumeRecord: record }, returnPage);
         return;
       }
       let questions = meta.questions || [];
@@ -726,12 +836,12 @@ export default function App() {
         durationMinutes: meta.durationMinutes,
       });
       setExamResumeRecord(record);
-      setResultReturnPage('history');
+      setResultReturnPage(returnPage);
       setPage('practice-exam');
       return;
     }
 
-    // completed -> result
+    // completed / awaiting_review -> 结果页（awaiting_review 继续完成自评）
     let questions = meta.questions || [];
     if (!questions.length && meta.questionIds?.length && window.openexam?.db?.getQuestionsByIds) {
       questions = await window.openexam.db.getQuestionsByIds(meta.questionIds);
@@ -745,20 +855,35 @@ export default function App() {
       wrongCount: Math.max(0, Number(record.total_count || 0) - Number(record.correct_count || 0)),
       unanswered: 0,
       accuracy: Number(record.accuracy || 0),
+      status,
       timeElapsed: Number(record.duration || 0),
       answers: record.answers || {},
+      verdicts: meta.verdicts || {},
       questions,
-      config: { title: meta.title || record.paper_title || '历史练习', category: record.category, mode: meta.mode },
+      recordId: record.id,
+      config: {
+        title: meta.title || record.paper_title || '历史练习',
+        category: record.category,
+        mode: meta.mode,
+        sourcePaperId: record.paper_id,
+        dailyDate: String(record.paper_id || '').startsWith('daily_') ? String(record.paper_id).slice(6) : undefined,
+      },
       paperTitle: meta.title || record.paper_title || '历史练习',
     });
-    setResultReturnPage('history');
+    setResultReturnPage(returnPage);
     setPage('result');
   };
+
+  // 每日一练提交后还有主观题没自评：从今日页直接回到结果页继续自评
+  const handleOpenDailyReview = (record) => handleOpenPracticeRecord(record, 'today');
 
   const handleRedoWrongFromResult = (result) => {
     const questions = result?.questions || [];
     const answers = result?.answers || {};
+    const verdicts = result?.verdicts || result?.subjectiveVerdicts || {};
     const wrong = questions.filter((q) => {
+      // 结果页里手动判过对错的（主观题、纸上作答的选择题等）以自评为准
+      if (verdicts[q.id]) return verdicts[q.id] === 'wrong';
       const ua = answers[q.id];
       if (ua == null || ua === '') return false;
       const uaText = Array.isArray(ua) ? ua.join(',') : String(ua);
@@ -800,7 +925,7 @@ export default function App() {
   const handleAskAIFromExam = (question, extra = {}) => {
     goAskAI(question, {
       ...extra,
-      prompt: '请讲解这道题：拆解考点、说明为什么选这个答案、再给一个类似练习。',
+      prompt: extra.prompt || '请讲解这道题：拆解考点、说明为什么选这个答案、再给一个类似练习。',
     });
   };
 
@@ -865,10 +990,11 @@ export default function App() {
       "今日": "today",
       "学习中心": "home",
       "题库练习": "practice",
-      "模拟考试": "papers",
       "AI出卷": "ai-generate",
       "我的成长": "growth",
     };
+    // 点导航进入题库练习时回到科目浏览；顶部搜索会单独把视图切到试卷列表
+    if (tab === "题库练习") setPracticeView("subjects");
     setPage(tabPageMap[tab] || "home");
   };
 
@@ -878,9 +1004,11 @@ export default function App() {
     setUserMenuOpen(false);
   };
 
+  // 顶部搜索直接展开「题库练习 → 试卷与模拟考」
   const handleOpenPaperSearch = () => {
-    setActiveTab("模拟考试");
-    setPage("papers");
+    setActiveTab("题库练习");
+    setPracticeView("papers");
+    setPage("practice");
     setPaperSearchFocusToken((token) => token + 1);
   };
 
@@ -889,15 +1017,65 @@ export default function App() {
     setPage("ai-generate");
   };
 
+  // 助教执行完动作后带用户去看结果页；科目页的「去问助教」直接打开合并后的 AI 助教并绑定科目
+  const handleSubjectNavigate = (target, subject) => {
+    if (target === "ask-assistant") {
+      setAssistantSubjectId(subject?.id || "");
+      setPage("ai-teacher");
+      return;
+    }
+    if (target === "notes") {
+      setActiveTab("");
+      setPage("notes");
+      return;
+    }
+    if (target === "materials") {
+      setActiveTab("");
+      setMaterialsSubjectId(subject?.id || "");
+      setPage("materials");
+      return;
+    }
+    if (target === "papers") {
+      setActiveTab("题库练习");
+      setMaterialsSubjectId(subject?.id || "");
+      setPracticeView("papers");
+      setPage("practice");
+      return;
+    }
+    if (target === "wrong-book") {
+      setActiveTab("");
+      setPage("wrong-book");
+      return;
+    }
+    if (target === "today") {
+      setActiveTab("今日");
+      setPage("today");
+    }
+  };
+
+  const handleAssistantNavigate = (target) => handleSubjectNavigate(target, null);
+
   // 考试模式全屏
   if (page === "exam" && currentPaperId) {
     return (
       <div className={`app theme-${theme}`}>
         <div className={appStageClassName}>
           <PageView key="exam" fullscreen>
-            <ExamRoom paperId={currentPaperId} config={practiceConfig} resumeRecord={examResumeRecord} onFinish={handleFinishExam} onExit={handleExitExam} onAskAI={handleAskAIFromExam} />
+            <ExamRoom
+              paperId={currentPaperId}
+              config={practiceConfig}
+              resumeRecord={examResumeRecord}
+              onFinish={handleFinishExam}
+              onExit={handleExitExam}
+              onAskAI={handleAskAIFromExam}
+              onSwitchToPractice={() => {
+                setExamResumeRecord(null);
+                setPracticeConfig({ mode: 'practice', title: practiceConfig?.title || '', sourcePaperId: currentPaperId });
+              }}
+            />
           </PageView>
         </div>
+        <ImportTaskDock onOpenImport={() => setPage("import")} onOpenReview={handleOpenReview} />
         {onboarding}
       </div>
     );
@@ -925,6 +1103,7 @@ export default function App() {
             />
           </PageView>
         </div>
+        <ImportTaskDock onOpenImport={() => setPage("import")} onOpenReview={handleOpenReview} />
         {onboarding}
       </div>
     );
@@ -939,12 +1118,13 @@ export default function App() {
             <ExamResult
               result={examResult}
               onBack={handleBackToList}
-              onRedoWrong={() => handleRedoWrongFromResult(examResult)}
+              onRedoWrong={(next) => handleRedoWrongFromResult(next || examResult)}
               onPracticeWeak={handlePracticeWeakFromResult}
-              onAskAI={() => handleAskAIFromResult(examResult)}
+              onAskAI={(question, extra) => question ? goAskAI(question, extra || {}) : handleAskAIFromResult(examResult)}
             />
           </PageView>
         </div>
+        <ImportTaskDock onOpenImport={() => setPage("import")} onOpenReview={handleOpenReview} />
         {onboarding}
       </div>
     );
@@ -960,14 +1140,14 @@ export default function App() {
           </button>
           <div className="rail-icons">
             <div className="rail-slider" />
-            {/* 申论 */}
-            <button className={`rail-icon essay ${page === 'essay' ? 'active' : ''}`} data-tip="申论" onClick={() => { setActiveTab(''); setPage('essay'); }}>
+            {/* 科目：学习平台入口，自建科目 + 教材解析 */}
+            <button className={`rail-icon subjects ${['subjects', 'materials'].includes(page) ? 'active' : ''}`} data-tip="我的科目" onClick={() => { setActiveTab(''); setPage('subjects'); }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
               </svg>
-              <span className="rail-icon-text">申论</span>
+              <span className="rail-icon-text">我的科目</span>
             </button>
-            {/* 笔记 */}
+            {/* 资料与题库统一从「我的科目」的科目卡片进入，不再单独占用左侧导航 */}
             <button className={`rail-icon notes ${page === 'notes' ? 'active' : ''}`} data-tip="笔记" onClick={() => { setActiveTab(''); setPage('notes'); }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -989,18 +1169,25 @@ export default function App() {
               </svg>
               <span className="rail-icon-text">分析报告</span>
             </button>
-            {/* AI 老师 */}
-            <button className={`rail-icon ai-teacher ${page === 'ai-teacher' ? 'active' : ''}`} data-tip="AI 老师" onClick={() => { setActiveTab(''); setPage('ai-teacher'); }}>
+            {/* AI 助教：合并页（答疑讲解 + 录题库 / 录错题 / 调计划） */}
+            <button className={`rail-icon ai-teacher ${page === 'ai-teacher' ? 'active' : ''}`} data-tip="AI 助教" onClick={() => { setActiveTab(''); setPage('ai-teacher'); }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2v10z"/>
-                <path d="M8 10h.01M12 10h.01M16 10h.01"/>
+                <path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 011 1v3a1 1 0 01-1 1h-1v1a2 2 0 01-2 2H5a2 2 0 01-2-2v-1H2a1 1 0 01-1-1v-3a1 1 0 011-1h1a7 7 0 017-7h1V5.73A2 2 0 0112 2z"/>
+                <circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/>
               </svg>
-              <span className="rail-icon-text">AI 老师</span>
+              <span className="rail-icon-text">AI 助教</span>
             </button>
           </div>
           <div className="rail-divider" />
           <div className="rail-bottom">
-            <button className={`rail-bottom-icon home-icon ${!['wrong-book','analytics','ai-teacher','notes','essay'].includes(page) ? 'active' : ''}`} data-tip="工作区" onClick={() => { setActiveTab('今日'); setPage('today'); }}>
+            <button
+              className="rail-user"
+              data-tip="个人资料"
+              onClick={() => { setSettingsSection('profile'); setPage('settings'); }}
+            >
+              {profile.avatar ? <img src={profile.avatar} alt="" /> : avatarLetter}
+            </button>
+            <button className={`rail-bottom-icon home-icon ${!['wrong-book','analytics','ai-teacher','notes'].includes(page) ? 'active' : ''}`} data-tip="工作区" onClick={() => { setActiveTab('今日'); setPage('today'); }}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                 <polyline points="9 22 9 12 15 12 15 22"/>
@@ -1015,26 +1202,19 @@ export default function App() {
               <span className="rail-icon-text">系统设置</span>
             </button>
           </div>
-          <button className="rail-chat chat-icon" data-tip="AI 老师快捷问答" onClick={() => { setActiveTab(''); setPage('ai-teacher'); }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M19 14a2 2 0 01-2 2H9l-4 4V6a2 2 0 012-2h10a2 2 0 012 2v8z"/>
-            </svg>
-            <span className="rail-icon-text">快捷问答</span>
-          </button>
         </aside>
 
         <section className="workspace">
           <header className="workspace-header">
             <div className="workspace-header-main">
               <button className="app-brand" type="button" onClick={() => { setActiveTab('今日'); setPage('today'); }}>
-                <img src={appLogo} alt="OpenExam" className="app-brand-logo" />
+                <img src={appLogo} alt="StudyStudio" className="app-brand-logo" />
                 <div className="app-brand-copy">
-                  <strong>OpenExam</strong>
-                  <span>AI 备考空间</span>
+                  <strong>StudyStudio</strong>
                 </div>
               </button>
               <nav className="tabs">
-                {["今日", "学习中心", "题库练习", "模拟考试", "AI出卷", "我的成长"].map(tab => (
+                {["今日", "学习中心", "题库练习", "AI出卷", "我的成长"].map(tab => (
                   <button key={tab} className={`tab ${activeTab === tab ? "active" : ""}`} onClick={() => handleTabChange(tab)}>
                     {tab}
                   </button>
@@ -1042,24 +1222,12 @@ export default function App() {
               </nav>
             </div>
             <div className="header-actions">
-              <div className="header-track">
-                <span className="header-track-label">类目</span>
-                <CustomSelect
-                  compact
-                  minWidth={92}
-                  ariaLabel="切换考试类目"
-                  value={examTrack}
-                  onChange={(next) => setExamTrack(normalizeExamTrack(next))}
-                  options={EXAM_TRACK_OPTIONS.map((item) => ({ value: item.key, label: item.label }))}
-                />
-              </div>
               <button className="search" type="button" onClick={handleOpenPaperSearch} title="搜索试卷">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
                 </svg>
               </button>
               <HomeNotifyBell
-                examTrack={examTrack}
                 onStartRecommend={handleStartRecommend}
                 onOpenAnalytics={() => { setActiveTab(''); setPage('analytics'); }}
               />
@@ -1074,7 +1242,9 @@ export default function App() {
                   >
                     <span className="user-name">{displayName}</span>
                     <div className="avatar-wrap">
-                      <div className="avatar">{avatarLetter}</div>
+                      <div className="avatar">
+                        {profile.avatar ? <img src={profile.avatar} alt="" /> : avatarLetter}
+                      </div>
                       <svg className="avatar-arrow" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M7 10l5 5 5-5z"/>
                       </svg>
@@ -1084,12 +1254,15 @@ export default function App() {
                   {userMenuOpen && (
                     <div className="user-menu">
                       <div className="user-menu-head">
-                        <div className="user-menu-avatar">{avatarLetter}</div>
+                        <div className="user-menu-avatar">
+                          {profile.avatar ? <img src={profile.avatar} alt="" /> : avatarLetter}
+                        </div>
                         <div>
                           <div className="user-menu-title">{displayName}</div>
                           <div className="user-menu-subtitle">本地学习账户</div>
                         </div>
                       </div>
+                      <button type="button" className="user-menu-item" onClick={() => { setSettingsSection("profile"); handleUserMenuNavigate("settings"); }}>个人资料</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("home", "学习中心")}>学习中心</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("growth", "我的成长")}>我的成长</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("achievements", "我的成长")}>成就列表</button>
@@ -1120,51 +1293,59 @@ export default function App() {
           </header>
 
           <div className="workspace-body">
-            <PageView key={page}>
+            <PageView key={page === "materials" || page === "practice" ? "library" : page} className={page === "import" ? "is-hidden" : ""}>
               {page === "today" ? (
                 <Today
                   onStartDrill={() => { setActiveTab('题库练习'); setPage('practice'); }}
                   onStartVocab={() => { setActiveTab('题库练习'); handleStartPractice('yanyu', 'xuanci', { questionCount: 15, mode: 'practice', shuffle: true }); }}
-                  onStartEssay={() => { setActiveTab(''); setPage('essay'); }}
+                  onStartEssay={() => { setActiveTab('题库练习'); setPage('practice'); }}
                   onOpenNotes={() => { setActiveTab(''); setPage('notes'); }}
+                  onStartReview={handleStartTodayReview}
+                  onStartDailyPractice={handleStartDailyPractice}
+                  onOpenDailyReview={handleOpenDailyReview}
                 />
-              ) : page === "essay" ? (
-                <Essay />
               ) : page === "notes" ? (
                 <Notes onBack={() => { setActiveTab('今日'); setPage('today'); }} />
-              ) : page === "papers" ? (
-                <PaperList
-                  onOpenPaper={(paper) => handleOpenPaper(paper, 'papers')}
-                  initialKeyword={paperSearchKeyword}
-                  focusToken={paperSearchFocusToken}
-                  examTrack={examTrack}
-                  onGoAIGenerate={handleGoToAIGenerate}
-                />
-              ) : page === "practice" ? (
-                <PracticeModule
-                  examTrack={examTrack}
-                  onImport={() => setPage("import")}
-                  onStartPractice={handleStartPractice}
+              ) : (page === "practice" || page === "materials") ? (
+                <Library
+                  subjectId={materialsSubjectId}
+                  tab={page === "materials" ? "materials" : "practice"}
+                  practiceInitialTab={practiceView}
+                  onSelectSubject={setMaterialsSubjectId}
+                  onBack={() => { setActiveTab(""); setPage("subjects"); }}
+                  onTabChange={(tab) => {
+                    setActiveTab(tab === "practice" ? "题库练习" : "");
+                    setPage(tab === "practice" ? "practice" : "materials");
+                  }}
+                  onImport={() => setPage("import")}                  onStartPractice={handleStartPractice}
                   onHistory={() => setPage("history")}
                   onGoAIGenerate={handleGoToAIGenerate}
+                  onOpenPaper={(paper) => handleOpenPaper(paper, 'practice')}
+                  onReviewPaper={(paper) => handleOpenReview(paper?.id, paper?.title)}
+                  onOpenSettings={(section) => { setSettingsSection(section || "runtime"); setPage("settings"); }}
+                  onOpenRecord={handleOpenPracticeRecord}
+                  initialKeyword={paperSearchKeyword}
+                  focusToken={paperSearchFocusToken}
                 />
               ) : page === "history" ? (
                 <PracticeHistory onBack={() => setPage("practice")} onOpenRecord={handleOpenPracticeRecord} />
-              ) : page === "import" ? (
-                <ImportPaper
-                  onBack={() => setPage("practice")}
-                  onImportComplete={(data) => {
-                    console.log('导入数据:', data);
-                    setActiveTab('模拟考试');
-                    setPage("papers");
-                  }}
+              ) : page === "import" ? null
+              : page === "settings" ? (
+                <Settings
+                  onBack={() => setPage("home")}
+                  profile={profile}
+                  initialSection={settingsSection}
+                  onProfileSaved={handleProfileSaved}
                 />
-              ) : page === "settings" ? (
-                <Settings onBack={() => setPage("home")} />
               ) : page === "ai-generate" ? (
-                <AIGenerate globalTrack={examTrack} onOpenPaper={(paper) => handleOpenPaper(paper, 'ai-generate')} />
+                <AIGenerate onOpenPaper={(paper) => handleOpenPaper(paper, 'ai-generate')} />
+              ) : page === "subjects" ? (
+                <Subjects onNavigate={handleSubjectNavigate} />
               ) : page === "ai-teacher" ? (
-                <AITeacher />
+                <AIHub
+                  onNavigate={handleAssistantNavigate}
+                  assistantSubjectId={assistantSubjectId}
+                />
               ) : page === "wrong-book" ? (
                 <WrongBook
                   onRedo={handleStartWrongRedo}
@@ -1187,28 +1368,39 @@ export default function App() {
                 <AchievementCenter onBack={() => { setActiveTab("我的成长"); setPage("growth"); }} />
               ) : (
                 <OriginalHomePage
-                  examTrack={examTrack}
                   onGoAIGenerate={handleGoToAIGenerate}
                   onOpenPractice={() => { setActiveTab('题库练习'); setPage('practice'); }}
                   onOpenWrongBook={() => { setActiveTab(''); setPage('wrong-book'); }}
                   onOpenHistory={() => setPage('history')}
                   onOpenAnalytics={() => { setActiveTab(''); setPage('analytics'); }}
+                  onOpenNotes={() => { setActiveTab(''); setPage('notes'); }}
                   onStartRecommend={handleStartRecommend}
                   onStartCategory={(category) => handleStartPractice(category, 'all', { questionCount: 10, mode: 'practice', shuffle: true })}
+                  onStartKnowledgePractice={handleStartKnowledgePractice}
                 />
               )}
             </PageView>
+            {/* 常驻挂载：切到其它页面时只隐藏，识别任务继续在后台跑 */}
+            <div className={`page-view import-paper-host${page === "import" ? "" : " is-hidden"}`}>
+              <ImportPaper
+                onBack={() => setPage("practice")}
+                onImportComplete={handleImportComplete}
+              />
+            </div>
           </div>
         </section>
         </div>
       </div>
+      {showOnboarding || onboardingClosing ? null : (
+        <ImportTaskDock onOpenImport={() => setPage("import")} onOpenReview={handleOpenReview} />
+      )}
       {onboarding}
     </div>
   );
 }
 
 // 右上角通知：承接今日推荐，不占首页主内容
-function HomeNotifyBell({ examTrack = "gongkao", onStartRecommend, onOpenAnalytics }) {
+function HomeNotifyBell({ onStartRecommend, onOpenAnalytics }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const hostRef = useRef(null);
@@ -1225,7 +1417,7 @@ function HomeNotifyBell({ examTrack = "gongkao", onStartRecommend, onOpenAnalyti
       }
     })();
     return () => { cancelled = true; };
-  }, [examTrack]);
+  }, []);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -1286,46 +1478,458 @@ function HomeNotifyBell({ examTrack = "gongkao", onStartRecommend, onOpenAnalyti
   );
 }
 
-// 学习中心主页
-function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractice, onOpenWrongBook, onOpenHistory, onOpenAnalytics, onStartRecommend, onStartCategory }) {
+/**
+ * 知识图谱浮层：一次只画一层。
+ *
+ * 旧版把「科目→模块→知识点→考点」整棵树塞进一张图，几百个节点挤在四列里，
+ * 连线全是直线，既看不清也点不动。现在改成放射状 + 逐层下钻：
+ *   点饼图 → 数学 → 高等数学 → 一元函数微分学 → 泰勒公式
+ * 每次只显示当前节点和它的直接子节点，连线用贝塞尔曲线向外发散。
+ *
+ * 布局按容器实际尺寸算（椭圆分布，1 单位 = 1 px），
+ * 不再用固定 viewBox 等比缩放 —— 1200×680 的窗口里缩放会把字缩到看不清。
+ */
+// 单层最多画 20 个节点，多出来的折成「其他 N 个」，避免节点糊成一团
+const KG_MAX_CHILDREN = 20;
+const KG_RING_CAPS = [8, 12];
+const KG_RING_FRACTIONS = [0.62, 1];
+// 胶囊宽度按字数估算：4 字约 92px，8 字约 150px，上限 180px
+const kgPillWidth = (label) => Math.min(180, Math.max(104, 34 + String(label || '').length * 14.5));
+
+function KnowledgeGraphOverlay({ graph, onClose, focusCategory = '', focusLabel = '', onOpenQuestions }) {
+  const tree = Array.isArray(graph?.tree) ? graph.tree : [];
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [trail, setTrail] = useState([]);
+  const [activeNode, setActiveNode] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const [size, setSize] = useState({ w: 1080, h: 620 });
+  const svgRef = useRef(null);
+  const dragRef = useRef(null);
+  const movedRef = useRef(false);
+
+  // 聚焦键既可能是四科 key（major），也可能是自建科目的完整节点 id（subject:subj_xxx）；
+  // 统一补成 subject:<key>，否则自建科目会被拼成 subject:subject:xxx 而聚焦失败。
+  const focusRaw = String(focusCategory || '').trim();
+  const focusId = focusRaw
+    ? (focusRaw.startsWith('subject:') ? focusRaw : `subject:${focusRaw}`)
+    : '';
+  const focusExists = Boolean(focusId) && tree.some((node) => node.id === focusId);
+  const focusMissing = Boolean(focusRaw) && !showAll && !focusExists;
+
+  const findNode = (nodes, id) => {
+    for (const node of nodes) {
+      if (node.id === id) return node;
+      const found = findNode(node.children || [], id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    setTrail(focusExists ? [focusId] : []);
+    setShowAll(false);
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+    setActiveNode(null);
+  }, [graph, focusId, focusExists]);
+
+  // 跟随窗口尺寸重排，避免小窗口里整张图被缩小
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 120 && rect.height > 120) {
+        setSize((prev) => (Math.abs(prev.w - rect.width) < 2 && Math.abs(prev.h - rect.height) < 2
+          ? prev
+          : { w: Math.round(rect.width), h: Math.round(rect.height) }));
+      }
+    };
+    update();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+    observer?.observe(el);
+    return () => observer?.disconnect();
+  }, []);
+
+  const centerNode = trail.length ? findNode(tree, trail[trail.length - 1]) : null;
+  const children = focusMissing ? [] : (centerNode ? (centerNode.children || []) : tree);
+  const crumbs = trail.map((id) => ({ id, label: findNode(tree, id)?.label || '' })).filter((item) => item.label);
+
+  // 单层节点太多时折叠成「其他 N 个」，宁可少画几个也不要把图挤成一团
+  const visibleChildren = useMemo(() => {
+    if (children.length <= KG_MAX_CHILDREN) return children;
+    const head = children.slice(0, KG_MAX_CHILDREN - 1);
+    const rest = children.slice(KG_MAX_CHILDREN - 1);
+    return [...head, {
+      id: `${centerNode?.id || 'root'}:more`,
+      label: `其他 ${rest.length} 个`,
+      type: children[0]?.type || 'point',
+      count: rest.reduce((sum, node) => sum + Number(node.count || 0), 0),
+      children: [],
+      isOverflow: true,
+    }];
+  }, [children, centerNode]);
+
+  const nodeLabel = (node) => {
+    const labels = { gaoshu: '高等数学', daishu: '线性代数', gaiilv: '概率论', yuedu: '阅读理解', fanyi: '翻译', wanxing: '完形填空', xiezuo: '英语写作', makesi: '马克思主义', maogai: '毛中特', shixi: '思想道德与法治', shiju: '形势与政策', general: '待分类' };
+    return labels[node.label] || node.label || '未命名';
+  };
+
+  const nodeCount = (node) => `${Number(node?.count || 0).toLocaleString()} 题`;
+
+  const layout = useMemo(() => {
+    const cx = size.w / 2;
+    const cy = size.h / 2;
+    // 给胶囊留出横向/纵向余量，避免贴边
+    const maxRx = Math.max(170, size.w / 2 - 118);
+    const maxRy = Math.max(130, size.h / 2 - 46);
+    const map = new Map();
+    let remaining = [...visibleChildren];
+    let ringIndex = 0;
+    // 节点很少时从「右」起排，宽扁的窗口里横向铺开比上下堆叠好看
+    const startAngle = visibleChildren.length <= 4 ? 0 : -Math.PI / 2;
+    const limitRx = size.w / 2 - 96;
+    const limitRy = size.h / 2 - 38;
+
+    while (remaining.length && ringIndex < KG_RING_CAPS.length) {
+      const ringNodes = remaining.slice(0, KG_RING_CAPS[ringIndex]);
+      remaining = remaining.slice(KG_RING_CAPS[ringIndex]);
+      const widest = Math.max(...ringNodes.map((node) => kgPillWidth(nodeLabel(node))));
+      const stagger = ringIndex * 0.34;
+      const angleOf = (index) => startAngle + stagger + (index * Math.PI * 2) / ringNodes.length;
+      const baseRx = maxRx * KG_RING_FRACTIONS[ringIndex];
+      const baseRy = maxRy * KG_RING_FRACTIONS[ringIndex];
+      let rx = baseRx;
+      let ry = baseRy;
+
+      // 椭圆太扁时相邻胶囊会挨在一起，逐步放大到不挤为止（但不许超出画布）
+      for (let step = 0; step < 8; step += 1) {
+        let minDist = Infinity;
+        ringNodes.forEach((_, index) => {
+          const a = angleOf(index);
+          const b = angleOf((index + 1) % ringNodes.length);
+          const dx = (Math.cos(a) - Math.cos(b)) * rx;
+          const dy = (Math.sin(a) - Math.sin(b)) * ry;
+          minDist = Math.min(minDist, Math.hypot(dx, dy));
+        });
+        if (ringNodes.length < 2 || minDist >= widest + 12) break;
+        rx = Math.min(limitRx, rx * 1.08);
+        ry = Math.min(limitRy, ry * 1.08);
+      }
+
+      ringNodes.forEach((node, index) => {
+        const angle = angleOf(index);
+        map.set(node.id, { x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry, angle, rx, ry });
+      });
+      ringIndex += 1;
+    }
+
+    return { map, cx, cy };
+  }, [visibleChildren, size]);
+
+  const centerRadius = centerNode ? (centerNode.type === 'subject' ? 62 : 56) : 66;
+
+  /**
+   * 拖拽平移：只有按在空白背景层上才开始，并且拖动超过 5px 才捕获指针。
+   * 一旦在 pointerdown 就 setPointerCapture，pointerup 会被重定向到容器，
+   * 浏览器算出的 click 目标就变成容器 —— 节点和「关闭」按钮全都点不动。
+   */
+  const handlePointerDown = (event) => {
+    if (event.button) return;
+    const onBlank = event.target?.dataset?.pan === '1';
+    if (!onBlank) {
+      movedRef.current = false;
+      return;
+    }
+    dragRef.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y, captured: false };
+    movedRef.current = false;
+  };
+  const handlePointerMove = (event) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (!drag.captured) {
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      drag.captured = true;
+      movedRef.current = true;
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    }
+    setOffset({ x: drag.ox + dx, y: drag.oy + dy });
+  };
+  const handlePointerUp = (event) => {
+    if (dragRef.current?.captured) event.currentTarget.releasePointerCapture?.(event.pointerId);
+    dragRef.current = null;
+  };
+
+  // 跳到该节点下的题目：交给上层去拉数据并进入练习
+  const openQuestions = (node) => {
+    if (!node || node.isOverflow || !node.category) return;
+    if (typeof onOpenQuestions === 'function') onOpenQuestions(node);
+  };
+
+  const drillInto = (node) => {
+    // 拖动画布时松手会补一个 click，别让它误触下钻
+    if (!node || movedRef.current) return;
+    // 底层节点没有更细的分类：第一次点选中，再点一次进题目
+    if (!node.children?.length) {
+      if (node.isOverflow) return;
+      if (activeNode?.id === node.id) {
+        openQuestions(node);
+        return;
+      }
+      setActiveNode(node);
+      return;
+    }
+    setActiveNode(node);
+    setTrail((current) => [...current, node.id]);
+    setOffset({ x: 0, y: 0 });
+    setZoom(1);
+  };
+
+  const jumpTo = (depth) => {
+    setTrail((current) => current.slice(0, depth));
+    setOffset({ x: 0, y: 0 });
+    setZoom(1);
+    setActiveNode(null);
+  };
+
+  const centerLines = (() => {
+    const label = centerNode ? nodeLabel(centerNode) : '知识图谱';
+    if (label.length <= 5) return [label];
+    const split = Math.ceil(label.length / 2);
+    return [label.slice(0, split), label.slice(split, split + 6)];
+  })();
+
+  // 选中的底层节点：入口放到工具栏里，避免浮层压住画布上的节点
+  const activeLeaf = activeNode && !activeNode.children?.length && !activeNode.isOverflow
+    && activeNode.category
+    ? activeNode
+    : null;
+
+  return (
+    <div className="knowledge-graph-overlay">
+      <div className="knowledge-graph-toolbar" onPointerDown={(event) => { event.stopPropagation(); movedRef.current = false; }}>
+        <div className="knowledge-graph-heading">
+          <div className="knowledge-graph-crumbs">
+            <button type="button" className={`kg-crumb ${trail.length ? '' : 'is-current'}`} onClick={() => { setShowAll(true); jumpTo(0); }}>全部科目</button>
+            {crumbs.map((crumb, index) => (
+              <React.Fragment key={crumb.id}>
+                <span className="kg-crumb-sep">/</span>
+                <button
+                  type="button"
+                  className={`kg-crumb ${index === crumbs.length - 1 ? 'is-current' : ''}`}
+                  onClick={() => jumpTo(index + 1)}
+                >
+                  {crumb.label}
+                </button>
+              </React.Fragment>
+            ))}
+          </div>
+          <strong>{centerNode ? `${nodeLabel(centerNode)} · ${nodeCount(centerNode)}` : '知识图谱'}</strong>
+          {activeLeaf ? (
+            <span className="kg-leaf-inline">
+              <em>{nodeLabel(activeLeaf)}</em>
+              <i>{`${Number(activeLeaf.count || 0)} 道题`}</i>
+              <button type="button" className="kg-leaf-inline-btn" onClick={() => openQuestions(activeLeaf)}>开始练习</button>
+            </span>
+          ) : (
+            <span>{children.length ? `点击节点继续下钻 · 当前展开 ${children.length} 个节点` : '已到底层 · 再点一次节点进入对应题目'}</span>
+          )}
+        </div>
+        <div className="knowledge-graph-actions">
+          {trail.length > 0 && <button type="button" onClick={() => jumpTo(trail.length - 1)}>上一级</button>}
+          <button type="button" onClick={() => setZoom((value) => Math.max(0.45, value - 0.12))}>−</button>
+          <span>{Math.round(zoom * 100)}%</span>
+          <button type="button" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}>重置</button>
+          <button type="button" onClick={() => setZoom((value) => Math.min(2.2, value + 0.12))}>＋</button>
+          <button type="button" className="knowledge-graph-close" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+      <svg
+        ref={svgRef}
+        className="knowledge-graph-canvas"
+        viewBox={`0 0 ${size.w} ${size.h}`}
+        role="img"
+        aria-label="考研知识图谱"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onWheel={(event) => { setZoom((value) => Math.max(0.45, Math.min(2.2, value * (event.deltaY > 0 ? 0.92 : 1.08)))); }}
+      >
+        <defs>
+          <radialGradient id="kg-center-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        <g transform={`translate(${offset.x} ${offset.y}) scale(${zoom})`}>
+          <rect className="kg-pan-layer" data-pan="1" x={-size.w} y={-size.h} width={size.w * 3} height={size.h * 3} />
+          <circle cx={layout.cx} cy={layout.cy} r={centerRadius * 2.6} fill="url(#kg-center-glow)" pointerEvents="none" />
+          <g key={centerNode?.id || 'root'} className="kg-level">
+            {visibleChildren.map((node, index) => {
+              const point = layout.map.get(node.id);
+              if (!point) return null;
+              const dx = point.x - layout.cx;
+              const dy = point.y - layout.cy;
+              const length = Math.hypot(dx, dy) || 1;
+              const ux = dx / length;
+              const uy = dy / length;
+              const px = -uy;
+              const py = ux;
+              const startX = layout.cx + ux * (centerRadius + 4);
+              const startY = layout.cy + uy * (centerRadius + 4);
+              const endX = point.x - ux * 18;
+              const endY = point.y - uy * 18;
+              const c1x = layout.cx + ux * length * 0.36 + px * length * 0.12;
+              const c1y = layout.cy + uy * length * 0.36 + py * length * 0.12;
+              const c2x = layout.cx + ux * length * 0.74 - px * length * 0.06;
+              const c2y = layout.cy + uy * length * 0.74 - py * length * 0.06;
+              return (
+                <path
+                  key={`link-${node.id}`}
+                  className={`kg-link kg-link-${node.type || 'point'}`}
+                  d={`M ${startX} ${startY} C ${c1x} ${c1y} ${c2x} ${c2y} ${endX} ${endY}`}
+                  style={{ animationDelay: `${index * 26}ms` }}
+                />
+              );
+            })}
+            {visibleChildren.map((node, index) => {
+              const point = layout.map.get(node.id);
+              if (!point) return null;
+              const label = nodeLabel(node);
+              const width = kgPillWidth(label);
+              const hasChildren = Boolean(node.children?.length);
+              const display = label.length > 10 ? `${label.slice(0, 9)}…` : label;
+              return (
+                <g
+                  key={node.id}
+                  className={`kg-node kg-node-${node.type || 'point'} ${hasChildren ? 'is-branch' : 'is-leaf'} ${activeNode?.id === node.id ? 'is-selected' : ''}`}
+                  transform={`translate(${point.x} ${point.y})`}
+                  onClick={(event) => { event.stopPropagation(); drillInto(node); }}
+                  style={{ animationDelay: `${index * 26}ms` }}
+                >
+                  <rect x={-width / 2} y={-20} width={width} height={40} rx={20} />
+                  <text textAnchor="middle" dy="4">{display}</text>
+                  <text className="kg-node-count" textAnchor="middle" dy="31">{nodeCount(node)}</text>
+                  {hasChildren && <text className="kg-node-more" x={width / 2 - 13} dy="4" textAnchor="middle">›</text>}
+                  {!hasChildren && !node.isOverflow && <text className="kg-node-more kg-node-go" x={width / 2 - 13} dy="4" textAnchor="middle">→</text>}
+                </g>
+              );
+            })}
+            <g
+              className={`kg-node kg-node-center ${trail.length ? 'can-back' : ''}`}
+              transform={`translate(${layout.cx} ${layout.cy})`}
+              onClick={(event) => { event.stopPropagation(); if (!movedRef.current && trail.length) jumpTo(trail.length - 1); }}
+            >
+              <circle r={centerRadius} />
+              {centerLines.map((line, index) => (
+                <text key={index} textAnchor="middle" dy={centerLines.length > 1 ? (index === 0 ? -6 : 10) : 4} className="kg-center-label">{line}</text>
+              ))}
+              {centerNode && <text className="kg-center-count" textAnchor="middle" dy={centerLines.length > 1 ? 26 : 20}>{nodeCount(centerNode)}</text>}
+            </g>
+          </g>
+        </g>
+      </svg>
+      {children.some((node) => node.label === '未归类章节') && (
+        <div className="kg-hint">
+          这批题还没有章节分类，去「题库练习 → 重新分类」跑一遍，图谱就会按章节展开。
+        </div>
+      )}
+      {focusMissing && (
+        <div className="knowledge-graph-empty">
+          「{focusLabel || '该科目'}」还没有可展示的图谱内容。
+          <button type="button" className="kg-leaf-inline-btn" style={{ marginLeft: 8 }} onClick={() => { setShowAll(true); setTrail([]); }}>查看全部科目</button>
+        </div>
+      )}
+      {!tree.length && <div className="knowledge-graph-empty">题库里还没有已归类到子类别 / 章节 / 知识点的题目。先到「题库练习 → 重新分类」，或让 AI 助教按知识图谱分类（需在确认卡片上确认后才会写库）。</div>}
+    </div>
+  );
+}
+
+function OriginalHomePage({ onGoAIGenerate, onOpenPractice, onOpenWrongBook, onOpenHistory, onOpenAnalytics, onOpenNotes, onStartRecommend, onStartCategory, onStartKnowledgePractice }) {
   const [stats, setStats] = useState({ totalQuestions: 0, totalDone: 0, accuracy: 0, wrongCount: 0, correctCount: 0, todayAdded: 0 });
   const [todayStats, setTodayStats] = useState({ total: 0, correct: 0, duration: 0 });
   const [categories, setCategories] = useState([]);
   const [dailyStats, setDailyStats] = useState([]);
   const [hoverDay, setHoverDay] = useState(null);
+  const [knowledgeGraph, setKnowledgeGraph] = useState(null);
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [graphFocusCategory, setGraphFocusCategory] = useState('');
+  const [graphFocusLabel, setGraphFocusLabel] = useState('');
+  const [subjectDistributions, setSubjectDistributions] = useState({});
+  const [resettingProgress, setResettingProgress] = useState(false);
+  const [progressRefreshKey, setProgressRefreshKey] = useState(0);
+  const { confirm: showConfirm, alert: showAlert, toast } = useDialog();
 
   useEffect(() => {
     const loadData = async () => {
       if (!window.openexam?.db) return;
       try {
-        const [practiceStats, categoryStats, daily, today] = await Promise.all([
+        const subjects = ['math', 'english', 'politics', 'major'];
+        const [practiceStats, categoryStats, daily, today, ...distributionRows] = await Promise.all([
           window.openexam.db.getPracticeStats(),
           window.openexam.db.getCategoryStats(),
           window.openexam.db.getDailyStats(7),
           window.openexam.db.getTodayStats?.() || Promise.resolve({ total: 0 }),
+          ...subjects.map((subject) => window.openexam.db.getSubCategoryStats?.(subject) || Promise.resolve([])),
         ]);
         setStats(practiceStats);
         setCategories(categoryStats);
         setDailyStats(daily);
         setTodayStats(today || { total: 0 });
+        setSubjectDistributions(Object.fromEntries(subjects.map((subject, index) => [subject, Array.isArray(distributionRows[index]) ? distributionRows[index] : []])));
       } catch (err) {
         console.error('加载统计数据失败:', err);
       }
     };
     loadData();
-  }, [examTrack]);
+  }, [progressRefreshKey]);
 
-  const categoryNames = {
-    yanyu: '言语理解',
-    shuliang: '数量关系',
-    panduan: '判断推理',
-    ziliao: '资料分析',
-    changshi: '常识判断'
+  const categoryNames = { math: '数学', english: '英语', politics: '政治', major: '专业课' };
+
+  // 重置学习进度：只清练习记录与错题复习阶梯，题目/笔记/错题条目保留
+  const handleResetStudyProgress = async (cat) => {
+    const resetAll = !cat;
+    const label = resetAll ? '全部学科' : (categoryNames[cat.category] || cat.label || cat.category);
+    if (!window.openexam?.db?.resetStudyProgress) {
+      await showAlert({ title: '暂不支持', message: '当前环境不支持重置学习进度。', tone: 'warning' });
+      return;
+    }
+    const confirmed = await showConfirm({
+      title: resetAll ? '重置全部学习进度' : `重置「${label}」学习进度`,
+      message: `将清空${resetAll ? '全部学科' : `「${label}」`}的练习记录（含未完成练习）和错题复习进度：完成度、正确率、已练题数会重新计算，错题会回到待复习状态。\n\n题目、笔记、错题条目本身不会删除，此操作无法撤销。是否继续？`,
+      confirmText: '确认重置',
+      cancelText: '取消',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+    try {
+      setResettingProgress(true);
+      const result = await window.openexam.db.resetStudyProgress(resetAll ? 'all' : cat.category);
+      if (!result?.success) throw new Error(result?.error || '重置失败');
+      setProgressRefreshKey((key) => key + 1);
+      toast({
+        title: '学习进度已重置',
+        message: `${label}：清除 ${Number(result.practiceRecords) || 0} 条练习记录，重置 ${Number(result.wrongQuestions) || 0} 道错题的复习进度`,
+        tone: 'success',
+      });
+    } catch (error) {
+      await showAlert({ title: '重置失败', message: error.message || '未知错误', tone: 'danger' });
+    } finally {
+      setResettingProgress(false);
+    }
   };
 
   const I = ({ d }) => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
 
   const categoryIcons = {
+    math: <I d={<><path d="M4 19h16"/><path d="M6 16l4-8 4 5 3-4 2 3"/></>} />,
+    english: <I d={<><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h6M8 16h4"/></>} />,
+    politics: <I d={<><circle cx="12" cy="12" r="9"/><path d="M8 12l2.5 2.5L16 9"/></>} />,
+    major: <I d={<><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></>} />,
     yanyu: <I d={<><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></>} />,
     shuliang: <I d={<><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></>} />,
     panduan: <I d={<><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></>} />,
@@ -1333,30 +1937,49 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
     changshi: <I d={<><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></>} />,
   };
 
-  const totalQuestions = categories.reduce((sum, c) => sum + c.total, 0);
-  const trackLabel = getExamTrackLabel(examTrack);
-  const isDefaultTrack = examTrack === "gongkao";
-  const overallPct = totalQuestions > 0 ? Math.round((stats.totalDone / totalQuestions) * 100) : 0;
   const chartHasData = dailyStats.some((d) => Number(d.total) > 0);
+  // 空类目（既没有题目也没有笔记）不进入目列表，也不提供图谱入口
+  const visibleCategories = (categories || []).filter((item) => (
+    Number(item?.total || 0) > 0 || Number(item?.notes || 0) > 0
+  ));
+  const baseSubjectCards = [
+    { key: 'math', label: '数学', color: '#4f76e8' },
+    { key: 'english', label: '英语', color: '#0f8a68' },
+    { key: 'politics', label: '政治', color: '#c47a2c' },
+    { key: 'major', label: '专业课', color: '#7b62c9' },
+  ].filter((card) => visibleCategories.some((item) => item.category === card.key));
+  // 自建科目（如「自动控制原理」）各自一个饼图，不再被算进「专业课」
+  const customSubjectCards = visibleCategories
+    .filter((item) => item?.isCustom)
+    .map((item, index) => ({
+      key: item.category,
+      label: item.label || '自建科目',
+      color: ['#3f8fb0', '#c2685e', '#6f9c4a', '#b07cc6', '#d09a3c'][index % 5],
+      isCustom: true,
+    }));
+  const subjectCards = [...baseSubjectCards, ...customSubjectCards];
+  const subCategoryNames = { gaoshu: '高数', daishu: '线代', gaiilv: '概率', wanxing: '完形', yuedu: '阅读', fanyi: '翻译', xiezuo: '写作', makesi: '马原', maogai: '毛中特', shixi: '思修', shiju: '时政', major: '专业课综合', general: '待分类' };
+  const openKnowledgeGraph = async (category = '', label = '') => {
+    // 图谱完全来自本地题库的分类字段，不再要求先配置 AI 才能查看
+    const result = await window.openexam?.db?.getKnowledgeGraph?.();
+    setKnowledgeGraph(result || { tree: [] });
+    setGraphFocusCategory(category);
+    setGraphFocusLabel(label);
+    setGraphOpen(true);
+  };
 
   return (
     <>
       <section className="main-panel home-main">
         <header className="home-main-header">
-          <div className="breadcrumb" style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>学习中心 &gt; {trackLabel}</div>
+          <div className="breadcrumb" style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>学习中心 &gt; 刷题</div>
           <div className="home-main-title-row">
-            <h2>{trackLabel}刷题</h2>
+            <h2>刷题</h2>
             <button onClick={() => onGoAIGenerate?.()} title="去 AI 出卷" className="home-inline-action">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
               AI 出卷
             </button>
           </div>
-          {!isDefaultTrack && (
-            <div className="home-inline-notice">
-              <span>当前类目「{trackLabel}」暂无内置题库，可先用 AI 出卷生成练习。</span>
-              <button type="button" onClick={() => onGoAIGenerate?.()}>去出卷</button>
-            </div>
-          )}
         </header>
 
         <div className="home-chart-block">
@@ -1404,43 +2027,47 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
         </div>
 
         <div className="home-bottom-grid">
-          <div className="home-stat-card">
-            <div className="home-stat-card-head">
-              <h3>题型分布</h3>
-              <span className="home-stat-dot" />
-            </div>
-            <div className="home-dist-body">
-              {(() => {
-                const colors = ["var(--accent)", "var(--accent-soft-bg-strong)", "var(--info)", "var(--warning)", "var(--success)"];
-                let cursor = 0;
-                const stops = categories.slice(0, 5).map((cat, idx) => {
-                  const deg = totalQuestions > 0 ? (cat.total / totalQuestions) * 360 : 0;
-                  const start = cursor;
-                  cursor += deg;
-                  return `${colors[idx % colors.length]} ${start}deg ${cursor}deg`;
-                });
-                const gradient = stops.length ? `conic-gradient(${stops.join(", ")})` : "conic-gradient(var(--accent-soft-bg) 0deg 360deg)";
-                return (
-                  <div className="home-donut" style={{ background: gradient }}>
-                    <div className="home-donut-inner">
-                      <strong>{totalQuestions.toLocaleString()}</strong>
-                      <span>总题数</span>
+          <div className="home-subject-pies">
+            {subjectCards.map((subject) => {
+              const category = categories.find((item) => item.category === subject.key);
+              const total = Number(category?.total || 0);
+              const rows = subjectDistributions[subject.key] || [];
+              const actualRows = rows.filter((row) => Number(row.count) > 0);
+              const slices = actualRows.length ? actualRows : (total > 0 ? [{ subCategory: 'general', count: total }] : []);
+              let cursor = 0;
+              const stops = slices.map((row, index) => {
+                const start = cursor;
+                cursor += total > 0 ? (Number(row.count) / total) * 360 : 0;
+                return `${[subject.color, '#8ea8ef', '#75bea8', '#d9a15e', '#aa94df'][index % 5]} ${start}deg ${cursor}deg`;
+              });
+              const gradient = stops.length ? `conic-gradient(${stops.join(', ')})` : 'conic-gradient(var(--accent-soft-bg) 0deg 360deg)';
+              return (
+                <div
+                  key={subject.key}
+                  className="home-stat-card home-subject-pie-card is-graph-entry"
+                  role="button"
+                  tabIndex={0}
+                  title={`打开${subject.label}知识图谱`}
+                  onClick={() => openKnowledgeGraph(subject.key, subject.label)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    openKnowledgeGraph(subject.key, subject.label);
+                  }}
+                >
+                  <div className="home-stat-card-head"><h3>{subject.label}</h3><span className="home-stat-dot" style={{ background: subject.color }} /></div>
+                  <div className="home-dist-body">
+                    <button type="button" className="home-donut home-donut-button" title={`打开${subject.label}知识图谱`} onClick={(event) => { event.stopPropagation(); openKnowledgeGraph(subject.key, subject.label); }} style={{ background: gradient }}>
+                      <div className="home-donut-inner"><strong>{total.toLocaleString()}</strong><span>题目</span></div>
+                    </button>
+                    <div className="home-dist-legend">
+                      {slices.slice(0, 4).map((row, index) => <div key={`${subject.key}-${row.subCategory}`} className="home-dist-legend-item"><span className="home-dist-bar" style={{ background: [subject.color, '#8ea8ef', '#75bea8', '#d9a15e'][index % 4] }} /><div><span className="home-dist-name">{subCategoryNames[row.subCategory] || row.subCategory || '待分类'}</span><strong>{Number(row.count || 0)} <em>道</em></strong></div></div>)}
+                      {!slices.length && <div className="home-pie-empty">暂无题目</div>}
                     </div>
                   </div>
-                );
-              })()}
-              <div className="home-dist-legend">
-                {categories.slice(0, 5).map((cat, idx) => (
-                  <div key={cat.category} className="home-dist-legend-item">
-                    <span className={`home-dist-bar tone-${idx}`} />
-                    <div>
-                      <span className="home-dist-name">{categoryNames[cat.category] || cat.category}</span>
-                      <strong>{cat.total.toLocaleString()} <em>道</em></strong>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="home-stat-card">
@@ -1479,6 +2106,7 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
             { label: '错题本', onClick: onOpenWrongBook },
             { label: '练习历史', onClick: onOpenHistory },
             { label: '分析报告', onClick: onOpenAnalytics },
+            { label: '笔记', onClick: onOpenNotes },
           ].map((item) => (
             <button key={item.label} type="button" onClick={() => item.onClick?.()}>{item.label}</button>
           ))}
@@ -1487,35 +2115,47 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
         <div className="home-side-progress">
           <div className="home-side-progress-head">
             <h4>学习进度</h4>
-            <span>{stats.accuracy}% 正确率</span>
+            <button
+              type="button"
+              className="home-progress-reset-all"
+              onClick={() => handleResetStudyProgress(null)}
+              disabled={resettingProgress || !visibleCategories.length}
+            >全部重置</button>
           </div>
-          <div className="home-side-progress-body">
-            <div className="home-side-ring" style={{ background: `conic-gradient(var(--accent) ${overallPct * 3.6}deg, var(--accent-soft-bg) 0deg)` }}>
-              <div><strong>{isDefaultTrack ? `${overallPct}%` : "—"}</strong></div>
-            </div>
-            <div className="home-side-progress-copy">
-              <strong>{isDefaultTrack ? "整体完成度" : "本类目练习"}</strong>
-              <span>
-                {isDefaultTrack
-                  ? `已练 ${stats.totalDone.toLocaleString()} / ${totalQuestions.toLocaleString()} 题`
-                  : `已练 ${stats.totalDone.toLocaleString()} 题`}
-              </span>
-              <span>今日 {Number(todayStats.total || 0)} 道 · 错题 {stats.wrongCount}</span>
-            </div>
+          <div className="home-progress-list">
+            {visibleCategories.length === 0 ? (
+              <div className="home-progress-empty">还没有可统计的学科</div>
+            ) : visibleCategories.map((cat) => {
+              const total = Number(cat.total || 0);
+              const done = Math.max(0, Number(cat.done || 0));
+              const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
+              const label = categoryNames[cat.category] || cat.label || cat.category;
+              return (
+                <div className="home-progress-row" key={cat.category}>
+                  <div className="home-progress-row-head">
+                    <span className="home-progress-name">{label}</span>
+                    <span className="home-progress-meta">{total > 0 ? `已练 ${done} / ${total} · ${pct}%` : '暂无题目'}</span>
+                    <button
+                      type="button"
+                      className="home-progress-reset"
+                      onClick={() => handleResetStudyProgress(cat)}
+                      disabled={resettingProgress}
+                    >重置</button>
+                  </div>
+                  <div className="home-progress-track"><div style={{ width: `${pct}%` }} /></div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
         <div className="home-side-banks">
           <div className="home-side-banks-head">
-            <h4>{isDefaultTrack ? "热门题库" : "练习入口"}</h4>
-            {isDefaultTrack ? (
-              <button type="button" onClick={() => onOpenPractice?.()}>全部 {categories.length} &gt;</button>
-            ) : (
-              <button type="button" onClick={() => onGoAIGenerate?.()}>AI 出卷 &gt;</button>
-            )}
+            <h4>学习科目</h4>
+            <button type="button" onClick={() => onOpenPractice?.()}>全部 {visibleCategories.length} &gt;</button>
           </div>
           <div className="home-side-banks-list">
-            {isDefaultTrack ? categories.map((cat, i) => {
+            {visibleCategories.map((cat, i) => {
               const pct = typeof cat.accuracy === 'number' && cat.answered > 0
                 ? cat.accuracy
                 : (cat.total > 0 ? Math.round(((cat.done || 0) / cat.total) * 100) : 0);
@@ -1527,7 +2167,7 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
                   <span className="home-side-icon">{categoryIcons[cat.category] || <I d={<circle cx="12" cy="12" r="10"/>} />}</span>
                   <div className="home-side-bank-copy">
                     <div className="home-side-bank-top">
-                      <span>{categoryNames[cat.category] || cat.category}</span>
+                      <span>{categoryNames[cat.category] || cat.label || cat.category}</span>
                       <span><b>{cat.done || 0}</b>/{cat.total.toLocaleString()}</span>
                     </div>
                     <div className="home-side-bank-bar">
@@ -1539,12 +2179,7 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
                   </div>
                 </button>
               );
-            }) : (
-              <div className="home-side-bank-empty">
-                <p>当前类目暂无内置题库</p>
-                <button type="button" onClick={() => onGoAIGenerate?.()}>去 AI 出卷</button>
-              </div>
-            )}
+            })}
           </div>
         </div>
 
@@ -1565,6 +2200,16 @@ function OriginalHomePage({ examTrack = "gongkao", onGoAIGenerate, onOpenPractic
           </div>
         </div>
       </aside>
+      {graphOpen && <KnowledgeGraphOverlay
+        graph={knowledgeGraph}
+        focusCategory={graphFocusCategory}
+        focusLabel={graphFocusLabel}
+        onClose={() => setGraphOpen(false)}
+        onOpenQuestions={(node) => {
+          setGraphOpen(false);
+          if (typeof onStartKnowledgePractice === 'function') onStartKnowledgePractice(node);
+        }}
+      />}
     </>
   );
 }

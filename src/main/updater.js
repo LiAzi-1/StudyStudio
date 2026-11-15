@@ -1,8 +1,8 @@
 const { app, BrowserWindow, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 
-const RELEASES_URL = 'https://github.com/lmk1010/OpenExam/releases';
-const LATEST_RELEASE_API = 'https://api.github.com/repos/lmk1010/OpenExam/releases/latest';
+const RELEASES_URL = 'https://github.com/LiAzi-1/StudyStudio/releases';
+const LATEST_RELEASE_API = 'https://api.github.com/repos/LiAzi-1/StudyStudio/releases/latest';
 const AUTO_INSTALL_ENABLED = process.platform === 'win32';
 
 let initialized = false;
@@ -62,24 +62,38 @@ function patchState(next) {
 }
 
 async function fetchLatestRelease() {
-  const response = await fetch(LATEST_RELEASE_API, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'OpenExam-Updater',
-    },
-  });
+  // 断网/代理挂起时 fetch 会一直不返回，而 checkForUpdates 在 checking 状态下直接短路，
+  // 界面就会永久停在「正在检查更新」。这里加硬超时，失败后允许重试
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(LATEST_RELEASE_API, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'OpenExam-Updater',
+      },
+      signal: controller.signal,
+    });
 
-  if (!response.ok) {
-    throw new Error(`GitHub Release 查询失败（${response.status}）`);
+    if (!response.ok) {
+      throw new Error(`GitHub Release 查询失败（${response.status}）`);
+    }
+
+    const payload = await response.json();
+    return {
+      version: normalizeVersion(payload.tag_name || payload.name || ''),
+      url: payload.html_url || RELEASES_URL,
+      notes: typeof payload.body === 'string' ? payload.body.slice(0, 4000) : '',
+      publishedAt: payload.published_at || payload.created_at || '',
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('连接 GitHub 超时（15s），请检查网络或代理后重试');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const payload = await response.json();
-  return {
-    version: normalizeVersion(payload.tag_name || payload.name || ''),
-    url: payload.html_url || RELEASES_URL,
-    notes: typeof payload.body === 'string' ? payload.body.slice(0, 4000) : '',
-    publishedAt: payload.published_at || payload.created_at || '',
-  };
 }
 
 function bindAutoUpdater() {
@@ -248,6 +262,14 @@ function quitAndInstallUpdate() {
 async function openExternal(targetUrl) {
   const url = String(targetUrl || '').trim();
   if (!url) return false;
+  // 只放行网页与邮件：避免渲染层用 file:// / smb:// / javascript: 让系统打开任意资源
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return false;
   await shell.openExternal(url);
   return true;
 }

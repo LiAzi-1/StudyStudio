@@ -264,7 +264,7 @@ export default function GrowthCenter({ onOpenAchievements, onStartPractice }) {
                     ? "建议重点复习错题，强化薄弱知识点。"
                     : d.practiceStats.accuracy < 80
                     ? "状态良好，可适当提升练习难度。"
-                    : "成绩优秀！建议挑战模拟考试。")
+                    : "成绩优秀！建议挑战整套试卷。")
                 : "开始刷题后，AI 将自动生成专属提升计划。"}
             </p>
             <button type="button" onClick={() => onStartPractice?.()} style={{ marginTop: 10, padding: "0", border: "none", background: "transparent", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>

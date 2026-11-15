@@ -1,6 +1,6 @@
 {
-  "name": "openexam",
-  "version": "0.2.2",
+  "name": "studystudio",
+  "version": "0.6.3",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -13,36 +13,48 @@
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "dist:win": "npm run build && electron-builder --win nsis",
     "rebuild:electron": "electron-builder install-app-deps",
-    "build:seed": "ELECTRON_RUN_AS_NODE=1 electron scripts/build-seed.js",
-    "sync:seed": "ELECTRON_RUN_AS_NODE=1 electron scripts/sync-seed.js",
-    "sanitize:seed": "ELECTRON_RUN_AS_NODE=1 electron scripts/sanitize-seed.js",
     "rewrite:analyses": "python3 scripts/original/rewrite_seed_analyses.py",
     "export:papers": "python3 scripts/original/export_all_papers.py",
     "patch:question-quality": "ELECTRON_RUN_AS_NODE=1 electron scripts/patch-question-quality.js --seed",
     "audit:question-bank": "ELECTRON_RUN_AS_NODE=1 electron scripts/audit-question-bank.js",
-    "tag:skill-points": "ELECTRON_RUN_AS_NODE=1 electron scripts/tag-skill-points.js"
+    "tag:skill-points": "ELECTRON_RUN_AS_NODE=1 electron scripts/tag-skill-points.js",
+    "obsidian:init": "python obsidian/bridge.py init",
+    "obsidian:status": "python obsidian/bridge.py status",
+    "obsidian:sync": "python obsidian/bridge.py sync",
+    "obsidian:format": "python obsidian/bridge.py format",
+    "obsidian:tutor": "python obsidian/bridge.py tutor",
+    "obsidian:mindmap": "python obsidian/bridge.py mindmap",
+    "obsidian:import": "python obsidian/bridge.py import",
+    "obsidian:unimport": "python obsidian/bridge.py unimport",
+    "obsidian:all": "python obsidian/bridge.py all",
+    "obsidian:latex": "python obsidian/bridge.py latex",
+    "obsidian:process": "python obsidian/bridge.py process",
+    "obsidian:watch": "python obsidian/bridge.py watch",
+    "verify:latex": "node scripts/verify-latex-format.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
     "better-sqlite3": "^12.6.2",
     "electron-updater": "^6.8.3",
-    "openai": "^6.17.0"
+    "katex": "^0.16.22",
+    "openai": "^6.17.0",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^8.2.2",
     "electron": "^30.0.2",
     "electron-builder": "^26.8.1",
-    "vite": "^5.4.8",
-    "wait-on": "^7.2.0",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "pdfjs-dist": "^5.5.207",
+    "vite": "^5.4.8",
+    "wait-on": "^7.2.0",
     "xlsx": "^0.18.5"
   },
   "build": {
-    "appId": "com.openexam.app",
-    "productName": "OpenExam",
+    "appId": "com.studystudio.app",
+    "productName": "StudyStudio",
     "asar": true,
     "asarUnpack": [
       "**/*.node"
@@ -57,8 +69,21 @@
       "preload.js",
       "src/main/**/*",
       "src/shared/**/*",
-      "src/renderer/assets/**/*",
-      "package.json"
+      "src/renderer/assets/openexam-app-icon.png",
+      "package.json",
+      "!node_modules/better-sqlite3/deps/**",
+      "!node_modules/better-sqlite3/src/**",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/*.d.mts",
+      "!node_modules/**/*.d.cts",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.ts",
+      "!node_modules/**/*.mts",
+      "!node_modules/**/*.md",
+      "!node_modules/katex/dist/katex.mjs",
+      "!node_modules/katex/dist/katex.min.js",
+      "!node_modules/katex/dist/contrib/**",
+      "!node_modules/katex/contrib/**"
     ],
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "mac": {
@@ -84,23 +109,39 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "lmk1010",
-        "repo": "OpenExam",
+        "owner": "LiAzi-1",
+        "repo": "StudyStudio",
         "releaseType": "release"
       }
     ],
     "electronUpdaterCompatibility": ">=2.16",
     "extraResources": [
       {
-        "from": "data/openexam.seed.db.gz",
-        "to": "openexam.seed.db.gz"
-      },
-      {
         "from": "data/question-assets",
         "to": "question-assets",
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "obsidian",
+        "to": "obsidian",
+        "filter": [
+          "**/*",
+          "!vault/**",
+          "!backups/**",
+          "!.cache/**",
+          "!__pycache__/**",
+          "!*.pyc"
+        ]
+      },
+      {
+        "from": "scripts/mineru4_extract.py",
+        "to": "mineru-scripts/mineru4_extract.py"
+      },
+      {
+        "from": "scripts/python_no_console",
+        "to": "mineru-scripts/python_no_console"
       }
     ],
     "compression": "maximum",
@@ -109,7 +150,7 @@
       "en-US"
     ]
   },
-  "description": "OpenExam desktop AI learning platform",
+  "description": "StudyStudio 考研智能学习平台",
   "author": "lmk1010",
   "license": "GPL-3.0-or-later"
 }

@@ -1,7 +1,9 @@
 /**
- * 备考待办 / 笔记 / 申论 / 词语 数据层
+ * 考研备考待办 / 笔记 / 题库 数据层
  * 与 database.js 共用同一个 better-sqlite3 连接，由 initDatabase() 调用 initStudyPlan(db)。
  */
+
+const { normalizeMath } = require('../shared/mathStyle.js');
 
 let db = null;
 
@@ -44,21 +46,21 @@ function stringifyJSON(value) {
 
 const DEFAULT_TEMPLATES = [
   {
-    title: '词语积累',
+    title: '英语词汇积累',
     kind: 'vocab',
     config: { source: 'xuanci' },
     target: { unit: 'count', value: 15 },
     sort: 10,
   },
   {
-    title: '申论·归纳概括',
+    title: '专业课知识点复盘',
     kind: 'essay',
-    config: { essayType: 'guina' },
-    target: { unit: 'count', value: 1 },
+    config: { subject: 'major' },
+    target: { unit: 'count', value: 10 },
     sort: 20,
   },
   {
-    title: '行测专项·薄弱考点',
+    title: '考研专项·薄弱考点',
     kind: 'drill',
     config: { mode: 'weak' },
     target: { unit: 'count', value: 30 },
@@ -120,6 +122,7 @@ function initStudyPlan(database) {
       source_id TEXT,
       source_label TEXT,
       pinned INTEGER DEFAULT 0,
+      meta TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -153,7 +156,7 @@ function initStudyPlan(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_vocab_reviews_due ON vocab_reviews(due_at);
 
-    -- 申论题目
+    -- 专业课主观题
     CREATE TABLE IF NOT EXISTS essay_prompts (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -172,7 +175,7 @@ function initStudyPlan(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_essay_prompts_type ON essay_prompts(essay_type);
 
-    -- 申论作答与批改
+    -- 专业课主观题作答与批改
     CREATE TABLE IF NOT EXISTS essay_attempts (
       id TEXT PRIMARY KEY,
       prompt_id TEXT NOT NULL,
@@ -191,7 +194,25 @@ function initStudyPlan(database) {
   `);
 
   initNotesSearch();
+  ensureNoteMetaColumn();
   seedDefaultTemplates();
+  // 科目体系：subjects 表 + 给 notes 等表补 subject_id 列
+  require('./subjectManager.js').initSubjects(database);
+}
+
+/**
+ * AI 助教分类结果存在 notes.meta 里（JSON）。
+ * 老库没有这一列，这里做一次幂等迁移。
+ */
+function ensureNoteMetaColumn() {
+  try {
+    const columns = db.prepare('PRAGMA table_info(notes)').all().map((row) => row.name);
+    if (!columns.includes('meta')) {
+      db.exec('ALTER TABLE notes ADD COLUMN meta TEXT');
+    }
+  } catch (error) {
+    console.warn('notes.meta 迁移失败:', error.message);
+  }
 }
 
 /**
@@ -513,7 +534,10 @@ function updateTodoInstance(input = {}) {
   const row = db.prepare('SELECT * FROM todo_instances WHERE id = ?').get(id);
   if (!row) throw new Error('待办不存在');
 
-  const target = parseJSON(row.target, { unit: 'count', value: 1 });
+  // 助教改计划时可能会同时改目标量；没传 target 就保持原值
+  const target = input.target && typeof input.target === 'object'
+    ? { unit: String(input.target.unit || 'count'), value: Math.max(1, Number(input.target.value) || 1) }
+    : parseJSON(row.target, { unit: 'count', value: 1 });
   const targetValue = Number(target?.value) || 0;
 
   let progress = row.progress;
@@ -531,6 +555,7 @@ function updateTodoInstance(input = {}) {
   db.prepare(`
     UPDATE todo_instances
     SET title = @title, progress = @progress, status = @status,
+        target = @target,
         meta = @meta,
         done_at = CASE WHEN @status = 'done' THEN COALESCE(done_at, CURRENT_TIMESTAMP) ELSE NULL END
     WHERE id = @id
@@ -539,6 +564,7 @@ function updateTodoInstance(input = {}) {
     title: input.title !== undefined ? String(input.title).trim() || row.title : row.title,
     progress,
     status,
+    target: stringifyJSON(target),
     meta: input.meta !== undefined ? stringifyJSON(input.meta) : row.meta,
   });
 
@@ -552,7 +578,7 @@ function deleteTodoInstance(id) {
 }
 
 /**
- * 业务侧回写进度：刷题 / 背词 / 交申论 / 记笔记 完成后调用，
+ * 业务侧回写进度：刷题 / 背词 / 专业课主观题 / 记笔记 完成后调用，
  * 按 kind 给当天未完成的对应待办累加进度。
  */
 function bumpTodoProgress(kind, amount = 1, dateStr = todayStr()) {
@@ -659,7 +685,9 @@ function mapNote(row) {
     sourceType: row.source_type || null,
     sourceId: row.source_id || null,
     sourceLabel: row.source_label || null,
+    subjectId: row.subject_id || null,
     pinned: !!row.pinned,
+    meta: parseJSON(row.meta, null),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     snippet: row.snippet,
@@ -675,18 +703,30 @@ function normalizeTags(tags) {
 }
 
 function saveNote(input = {}) {
-  const content = String(input.content ?? '');
+  // 笔记库是 Obsidian 镜像的唯一来源：无论正文来自 AI 助教、教材解析、
+  // 手动编辑还是 vault 回流，落库前统一成 Obsidian / MathJax 能渲染的 LaTeX。
+  // 规范化幂等，且对不含公式的正文原样返回。
+  const normalized = normalizeMath(String(input.content ?? ''));
+  if (normalized.warnings.length) {
+    console.warn('[Notes] 公式格式提醒：', ...normalized.warnings.slice(0, 3));
+  }
+  const content = normalized.text;
   const tags = normalizeTags(input.tags);
   const title = String(input.title || '').trim() || deriveNoteTitle(content);
 
   if (input.id) {
-    const exists = db.prepare('SELECT id FROM notes WHERE id = ?').get(input.id);
+    const exists = db.prepare('SELECT id, meta FROM notes WHERE id = ?').get(input.id);
     if (exists) {
+      // meta 不传就保留原值；显式传 null 才是清空（撤销整理时会用到）
+      const nextMeta = input.meta === undefined
+        ? (exists.meta ?? null)
+        : stringifyJSON(input.meta);
       db.prepare(`
         UPDATE notes
         SET title = @title, content = @content, tags = @tags,
             source_type = @sourceType, source_id = @sourceId, source_label = @sourceLabel,
-            pinned = @pinned, updated_at = CURRENT_TIMESTAMP
+            subject_id = COALESCE(@subjectId, subject_id),
+            pinned = @pinned, meta = @meta, updated_at = CURRENT_TIMESTAMP
         WHERE id = @id
       `).run({
         id: input.id,
@@ -696,7 +736,9 @@ function saveNote(input = {}) {
         sourceType: input.sourceType || null,
         sourceId: input.sourceId || null,
         sourceLabel: input.sourceLabel || null,
+        subjectId: input.subjectId || null,
         pinned: input.pinned ? 1 : 0,
+        meta: nextMeta,
       });
       return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(input.id));
     }
@@ -704,8 +746,8 @@ function saveNote(input = {}) {
 
   const id = input.id || uid();
   db.prepare(`
-    INSERT INTO notes (id, title, content, tags, source_type, source_id, source_label, pinned)
-    VALUES (@id, @title, @content, @tags, @sourceType, @sourceId, @sourceLabel, @pinned)
+    INSERT INTO notes (id, title, content, tags, source_type, source_id, source_label, subject_id, pinned, meta)
+    VALUES (@id, @title, @content, @tags, @sourceType, @sourceId, @sourceLabel, @subjectId, @pinned, @meta)
   `).run({
     id,
     title,
@@ -714,7 +756,9 @@ function saveNote(input = {}) {
     sourceType: input.sourceType || null,
     sourceId: input.sourceId || null,
     sourceLabel: input.sourceLabel || null,
+    subjectId: input.subjectId || null,
     pinned: input.pinned ? 1 : 0,
+    meta: stringifyJSON(input.meta ?? null),
   });
 
   bumpTodoProgress('note', 1);
@@ -747,6 +791,10 @@ function getNotes(options = {}) {
   if (options.tag) {
     where.push('tags LIKE @tag');
     params.tag = `%"${options.tag}"%`;
+  }
+  if (options.subjectId) {
+    where.push('subject_id = @subjectId');
+    params.subjectId = options.subjectId;
   }
 
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -817,7 +865,7 @@ function getNoteTags() {
     .sort((a, b) => b.count - a.count);
 }
 
-/* ------------------------------------------------------------------ 申论 */
+/* ------------------------------------------------------------------ 专业课主观题 */
 
 const ESSAY_TYPES = ['guina', 'duice', 'fenxi', 'guanche', 'dazuowen'];
 
@@ -990,7 +1038,7 @@ function saveEssayAttempt(input = {}) {
     try {
       bumpTodoProgress('essay', 1);
     } catch (error) {
-      console.error('回写申论待办失败:', error);
+      console.error('回写专业课主观题待办失败:', error);
     }
   }
 
@@ -1077,7 +1125,7 @@ module.exports = {
   deleteNote,
   searchNotes,
   getNoteTags,
-  // 申论
+  // 专业课主观题
   saveEssayPrompt,
   getEssayPrompts,
   getEssayPrompt,

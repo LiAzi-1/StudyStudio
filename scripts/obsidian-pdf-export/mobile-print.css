@@ -1,0 +1,357 @@
+/* ============================================================
+   mobile-print.css
+   用途：Obsidian「导出为 PDF / 打印」的手机竖屏阅读优化
+   启用：设置 → 外观 → CSS 片段 → 打开 mobile-print
+   说明：所有排版规则都写在 @media print 内，不影响平时在 Obsidian 里的显示与编辑
+   部署位置：<vault>/.obsidian/snippets/mobile-print.css
+   ============================================================ */
+
+@page {
+  size: A4 portrait;
+  margin: 15mm 13mm 16mm 13mm;
+}
+
+@media print {
+  /* ---------- 1. 隐藏界面外壳与交互元素 ---------- */
+  .workspace-ribbon,
+  .workspace-split.mod-left-split,
+  .workspace-split.mod-right-split,
+  .workspace-leaf-resize-handle,
+  .status-bar,
+  .titlebar,
+  .view-header,
+  .view-actions,
+  .view-header-nav-buttons,
+  .view-header-breadcrumb,
+  .markdown-source-view,
+  .cm-editor,
+  .metadata-container,
+  .frontmatter,
+  .frontmatter-container,
+  .copy-code-button,
+  .code-block-flair,
+  .code-block-flash,
+  .collapse-indicator,
+  .heading-collapse-indicator,
+  .markdown-embed-title,
+  .embed-title,
+  .backlink-pane,
+  .outgoing-link-pane,
+  .tag-container,
+  .search-input-container,
+  .empty-state,
+  .modal-container,
+  .suggestion-container,
+  .tooltip {
+    display: none !important;
+  }
+
+  /* ---------- 2. 页面与正文基准 ---------- */
+  html,
+  body {
+    background: #ffffff !important;
+    color: #1a1a1a !important;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",
+      "Segoe UI", -apple-system, sans-serif;
+    font-size: 12.5pt;
+    line-height: 1.8;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Obsidian 阅读视图的滚动容器在打印时必须放开，否则只打印首屏 */
+  .markdown-preview-view,
+  .markdown-reading-view,
+  .markdown-rendered,
+  .markdown-preview-sizer,
+  .markdown-preview-section {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .markdown-rendered {
+    font-size: 12.5pt;
+    line-height: 1.8;
+    color: #1a1a1a;
+  }
+
+  /* ---------- 3. 标题层级 ---------- */
+  .markdown-rendered h1,
+  .markdown-rendered h2,
+  .markdown-rendered h3,
+  .markdown-rendered h4,
+  .markdown-rendered h5,
+  .markdown-rendered h6 {
+    color: #111111;
+    font-weight: 700;
+    line-height: 1.35;
+    break-after: avoid-page;
+    page-break-after: avoid;
+    break-inside: avoid;
+  }
+
+  .markdown-rendered h1 {
+    font-size: 19pt;
+    margin: 0 0 0.7em;
+    padding-bottom: 0.3em;
+    border-bottom: 1.5px solid #2f3b4a;
+  }
+
+  .markdown-rendered h2 {
+    font-size: 15.5pt;
+    margin: 1.5em 0 0.55em;
+    padding-bottom: 0.2em;
+    border-bottom: 1px solid #d7dde5;
+  }
+
+  .markdown-rendered h3 {
+    font-size: 13.5pt;
+    margin: 1.25em 0 0.45em;
+    color: #1f2a37;
+  }
+
+  .markdown-rendered h4 {
+    font-size: 12.5pt;
+    margin: 1.1em 0 0.4em;
+    color: #34404f;
+  }
+
+  .markdown-rendered h5,
+  .markdown-rendered h6 {
+    font-size: 12pt;
+    margin: 1em 0 0.35em;
+    color: #4a5666;
+  }
+
+  /* 标题紧跟正文，避免「孤行标题」落在页脚 */
+  .markdown-rendered h1 + *,
+  .markdown-rendered h2 + *,
+  .markdown-rendered h3 + * {
+    break-before: avoid-page;
+    page-break-before: avoid;
+  }
+
+  /* ---------- 4. 段落、列表 ---------- */
+  .markdown-rendered p {
+    margin: 0.6em 0;
+    orphans: 3;
+    widows: 3;
+    word-break: break-word;
+  }
+
+  .markdown-rendered ul,
+  .markdown-rendered ol {
+    margin: 0.55em 0;
+    padding-inline-start: 1.6em;
+  }
+
+  .markdown-rendered li {
+    margin: 0.28em 0;
+    word-break: break-word;
+  }
+
+  .markdown-rendered li > p {
+    margin: 0.25em 0;
+  }
+
+  .markdown-rendered strong {
+    font-weight: 700;
+    color: #000000;
+  }
+
+  .markdown-rendered hr {
+    border: none;
+    border-top: 1px solid #d7dde5;
+    margin: 1.4em 0;
+  }
+
+  /* ---------- 5. 引用与 Callout ---------- */
+  .markdown-rendered blockquote {
+    margin: 0.9em 0;
+    padding: 0.55em 0.9em;
+    border-left: 3px solid #9fb0c4;
+    background: #f7f9fb;
+    color: #2b3440;
+    border-radius: 0 3px 3px 0;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered blockquote > p:first-child {
+    margin-top: 0;
+  }
+
+  .markdown-rendered blockquote > p:last-child {
+    margin-bottom: 0;
+  }
+
+  .markdown-rendered .callout {
+    margin: 0.9em 0;
+    padding: 0.5em 0.85em;
+    border-radius: 4px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered .callout-title {
+    font-weight: 700;
+    font-size: 12pt;
+    margin-bottom: 0.25em;
+  }
+
+  .markdown-rendered .callout-content > p {
+    margin: 0.35em 0;
+  }
+
+  /* ---------- 6. 代码块：整块不跨页，长行折行 ---------- */
+  .markdown-rendered pre {
+    margin: 0.9em 0;
+    padding: 8px 10px;
+    background: #f5f6f8 !important;
+    border: 1px solid #e1e5ea;
+    border-radius: 4px;
+    font-size: 10pt;
+    line-height: 1.55;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered pre code {
+    background: transparent !important;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    white-space: inherit;
+    color: #1f2733;
+    font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
+  }
+
+  .markdown-rendered code {
+    font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
+    font-size: 0.92em;
+    background: #f1f3f6;
+    border-radius: 3px;
+    padding: 0.1em 0.3em;
+    word-break: break-word;
+  }
+
+  /* ---------- 7. 表格：长表格可读 ---------- */
+  .markdown-rendered table {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0.9em 0;
+    border-collapse: collapse;
+    table-layout: auto;
+    font-size: 10.5pt;
+    line-height: 1.55;
+    break-inside: auto;
+  }
+
+  .markdown-rendered thead {
+    display: table-header-group;
+  }
+
+  .markdown-rendered tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered th,
+  .markdown-rendered td {
+    border: 1px solid #d5dae1;
+    padding: 5px 7px;
+    vertical-align: top;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  .markdown-rendered th {
+    background: #f0f3f7 !important;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .markdown-rendered tbody tr:nth-child(even) td {
+    background: #fafbfc !important;
+  }
+
+  /* ---------- 8. 图片与嵌入 ---------- */
+  .markdown-rendered img {
+    max-width: 100% !important;
+    /* 竖版扫描页按比例缩到一页内，避免超出页面高度产生空白页 */
+    max-height: 238mm !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain;
+    display: block;
+    margin: 0.8em auto;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    border-radius: 3px;
+  }
+
+  .markdown-rendered .image-embed,
+  .markdown-rendered figure,
+  .markdown-rendered .internal-embed {
+    max-width: 100% !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered svg {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* ---------- 9. 数学公式：不跨页、不溢出 ---------- */
+  .markdown-rendered .math,
+  .markdown-rendered mjx-container,
+  .markdown-rendered .katex {
+    font-size: 1.02em;
+    color: #111111;
+  }
+
+  .markdown-rendered .math-block,
+  .markdown-rendered mjx-container[display="true"],
+  .markdown-rendered .katex-display {
+    display: block;
+    margin: 0.85em 0;
+    max-width: 100%;
+    overflow: visible !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .markdown-rendered mjx-container[jax="CHTML"] {
+    max-width: 100%;
+  }
+
+  /* ---------- 10. 链接：打印后可读，但不上色过艳 ---------- */
+  .markdown-rendered a,
+  .markdown-rendered .internal-link {
+    color: #1f4e79;
+    text-decoration: none;
+    border-bottom: none !important;
+  }
+
+  .markdown-rendered .internal-link.is-unresolved {
+    color: #8a5a00;
+  }
+
+  /* ---------- 11. 分页控制 ---------- */
+  .markdown-rendered > *:first-child {
+    margin-top: 0 !important;
+  }
+
+  .markdown-rendered .task-list-item {
+    list-style: none;
+    margin-inline-start: -1.2em;
+  }
+}

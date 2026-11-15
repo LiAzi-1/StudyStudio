@@ -10,18 +10,35 @@ contextBridge.exposeInMainWorld("openexam", {
   // 数据库 API
   db: {
     getPapers: () => ipcRenderer.invoke("db:getPapers"),
-    getQuestions: (paperId) => ipcRenderer.invoke("db:getQuestions", paperId),
+    getQuestions: (paperId, limit) => ipcRenderer.invoke("db:getQuestions", paperId, limit),
     getQuestionsByIds: (ids) => ipcRenderer.invoke("db:getQuestionsByIds", ids),
     savePracticeRecord: (record) => ipcRenderer.invoke("db:savePracticeRecord", record),
     getPracticeRecords: () => ipcRenderer.invoke("db:getPracticeRecords"),
     addWrongQuestion: (data) => ipcRenderer.invoke("db:addWrongQuestion", data),
     getWrongQuestions: (options) => ipcRenderer.invoke("db:getWrongQuestions", options),
+    getWrongQuestionById: (id) => ipcRenderer.invoke("db:getWrongQuestionById", id),
+    saveCustomWrongQuestion: (input) => ipcRenderer.invoke("db:saveCustomWrongQuestion", input),
     reviewWrongQuestion: (input) => ipcRenderer.invoke("db:reviewWrongQuestion", input),
+    removeWrongQuestion: (input) => ipcRenderer.invoke("db:removeWrongQuestion", input),
+    addWrongImage: (input) => ipcRenderer.invoke("wrong:addImage", input),
+    removeWrongImage: (input) => ipcRenderer.invoke("wrong:removeImage", input),
+    updatePracticeRecordScore: (input) => ipcRenderer.invoke("db:updatePracticeRecordScore", input),
     getCategoryStats: () => ipcRenderer.invoke("db:getCategoryStats"),
+    getKnowledgeGraph: () => ipcRenderer.invoke("db:getKnowledgeGraph"),
+    getReclassifyBatches: () => ipcRenderer.invoke("db:getReclassifyBatches"),
+    getQuestionsByKnowledge: (options) => ipcRenderer.invoke("db:getQuestionsByKnowledge", options),
     getSmartRecommend: (options) => ipcRenderer.invoke("db:getSmartRecommend", options),
     getSubCategoryStats: (category) => ipcRenderer.invoke("db:getSubCategoryStats", category),
     getPracticeStats: () => ipcRenderer.invoke("db:getPracticeStats"),
+    resetStudyProgress: (category) => ipcRenderer.invoke("db:resetStudyProgress", category),
     importPaper: (paperData, questions) => ipcRenderer.invoke("db:importPaper", { paperData, questions }),
+    appendImportedQuestions: (paperId, questions) => ipcRenderer.invoke("db:appendImportedQuestions", { paperId, questions }),
+    stageImportedQuestions: (input) => ipcRenderer.invoke("db:stageImportedQuestions", input),
+    updateStagedQuestions: (input) => ipcRenderer.invoke("db:updateStagedQuestions", input),
+    getPendingStagedQuestions: (input) => ipcRenderer.invoke("db:getPendingStagedQuestions", input),
+    getStagingSummary: (input) => ipcRenderer.invoke("db:getStagingSummary", input),
+    recoverStagedImports: (input) => ipcRenderer.invoke("db:recoverStagedImports", input),
+    clearStagedQuestions: (input) => ipcRenderer.invoke("db:clearStagedQuestions", input),
     saveAIPaper: (paperData, questions) => ipcRenderer.invoke("db:saveAIPaper", { paperData, questions }),
     getImportedPapers: () => ipcRenderer.invoke("db:getImportedPapers"),
     getSavedAIPapers: () => ipcRenderer.invoke("db:getSavedAIPapers"),
@@ -51,8 +68,24 @@ contextBridge.exposeInMainWorld("openexam", {
     exportAllData: () => ipcRenderer.invoke("db:exportAllData"),
     exportBackupFile: (clientState) => ipcRenderer.invoke("db:exportBackupFile", clientState),
     importBackupFile: () => ipcRenderer.invoke("db:importBackupFile"),
+    listLocalBackups: () => ipcRenderer.invoke("db:listLocalBackups"),
+    createLocalBackup: () => ipcRenderer.invoke("db:createLocalBackup"),
+    restoreLocalBackup: (name) => ipcRenderer.invoke("db:restoreLocalBackup", name),
     resetUserData: () => ipcRenderer.invoke("db:resetUserData"),
     clearAllData: () => ipcRenderer.invoke("db:clearAllData"),
+  },
+
+  // 今日复习队列（错题阶梯到期）
+  review: {
+    getTodayQueue: () => ipcRenderer.invoke("review:getTodayQueue"),
+    addToday: (id) => ipcRenderer.invoke("review:addToday", id),
+  },
+
+  // 每日一练
+  dailyPractice: {
+    getToday: (date) => ipcRenderer.invoke("daily:get", date),
+    ensure: (input) => ipcRenderer.invoke("daily:ensure", input),
+    complete: (input) => ipcRenderer.invoke("daily:complete", input),
   },
 
   // 备考待办
@@ -78,6 +111,32 @@ contextBridge.exposeInMainWorld("openexam", {
     remove: (id) => ipcRenderer.invoke("note:delete", id),
     search: (keyword, options) => ipcRenderer.invoke("note:search", { keyword, options }),
     tags: () => ipcRenderer.invoke("note:tags"),
+    tutor: (input) => ipcRenderer.invoke("note:tutor", input),
+    addImage: (input) => ipcRenderer.invoke("note:addImage", input),
+    removeImage: (input) => ipcRenderer.invoke("note:removeImage", input),
+  },
+
+  // Obsidian 联动：笔记双向同步 / 知识地图 / 仓库设置
+  obsidian: {
+    status: () => ipcRenderer.invoke("obsidian:status"),
+    sync: () => ipcRenderer.invoke("obsidian:sync"),
+    mindmap: () => ipcRenderer.invoke("obsidian:mindmap"),
+    refresh: () => ipcRenderer.invoke("obsidian:refresh"),
+    openMap: () => ipcRenderer.invoke("obsidian:openMap"),
+    openVault: () => ipcRenderer.invoke("obsidian:openVault"),
+    openNote: (noteId) => ipcRenderer.invoke("obsidian:openNote", noteId),
+    revealNote: (noteId) => ipcRenderer.invoke("obsidian:revealNote", noteId),
+    notePath: (noteId) => ipcRenderer.invoke("obsidian:notePath", noteId),
+    openFolder: () => ipcRenderer.invoke("obsidian:openFolder"),
+    chooseVault: () => ipcRenderer.invoke("obsidian:chooseVault"),
+    setVault: (dir) => ipcRenderer.invoke("obsidian:setVault", dir),
+    setAutoSync: (enabled) => ipcRenderer.invoke("obsidian:setAutoSync", enabled),
+    advanced: (command) => ipcRenderer.invoke("obsidian:advanced", command),
+    onNotesPulled: (handler) => {
+      const listener = (_event, pulled) => handler(pulled);
+      ipcRenderer.on("obsidian:notesPulled", listener);
+      return () => ipcRenderer.removeListener("obsidian:notesPulled", listener);
+    },
   },
 
   // 申论
@@ -114,28 +173,154 @@ contextBridge.exposeInMainWorld("openexam", {
     exportPdf: (payload) => ipcRenderer.invoke("paper:exportPdf", payload),
   },
 
+  // AI 助教（合并后的统一入口：答疑 + 动作）
+  aiChat: {
+    getContext: () => ipcRenderer.invoke("aiChat:getContext"),
+    chat: (payload = {}) => ipcRenderer.invoke("aiChat:chat", payload),
+    structureChatLog: (payload = {}) => ipcRenderer.invoke("aiChat:structureChatLog", payload),
+    importChatLog: (payload = {}) => ipcRenderer.invoke("aiChat:importChatLog", payload),
+    importShareLink: (payload = {}) => ipcRenderer.invoke("aiChat:importShareLink", payload),
+    commitShareImport: (payload = {}) => ipcRenderer.invoke("aiChat:commitShareImport", payload),
+    chatStreamStart: (payload = {}) => ipcRenderer.invoke("aiChat:chatStreamStart", payload),
+    chatStreamCancel: (requestId) => ipcRenderer.invoke("aiChat:chatStreamCancel", requestId),
+    onEvent: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("aiChat:event", listener);
+      return () => ipcRenderer.removeListener("aiChat:event", listener);
+    },
+    saveMessageImages: (input = {}) => ipcRenderer.invoke("aiChat:saveMessageImages", input),
+    readImage: (relativePath) => ipcRenderer.invoke("aiChat:readImage", relativePath),
+    imageStats: (sessionId) => ipcRenderer.invoke("aiChat:imageStats", sessionId),
+    cleanupImages: () => ipcRenderer.invoke("aiChat:cleanupImages"),
+    updateMessageMeta: (input = {}) => ipcRenderer.invoke("aiChat:updateMessageMeta", input),
+    setSessionContext: (input = {}) => ipcRenderer.invoke("aiChat:setSessionContext", input),
+  },
+
+  // 手机扫码传图（临时局域网服务，用完即关）
+  phoneUpload: {
+    start: (options = {}) => ipcRenderer.invoke("phoneUpload:start", options),
+    stop: () => ipcRenderer.invoke("phoneUpload:stop"),
+    status: () => ipcRenderer.invoke("phoneUpload:status"),
+    onEvent: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("phoneUpload:event", listener);
+      return () => ipcRenderer.removeListener("phoneUpload:event", listener);
+    },
+  },
+
+  // 科目体系（学习平台）
+  subject: {
+    save: (input) => ipcRenderer.invoke("subject:save", input),
+    list: () => ipcRenderer.invoke("subject:list"),
+    get: (id) => ipcRenderer.invoke("subject:get", id),
+    stats: (id) => ipcRenderer.invoke("subject:stats", id),
+    remove: (id) => ipcRenderer.invoke("subject:delete", id),
+    textbookPage: (subjectId, page) => ipcRenderer.invoke("subject:textbookPage", { subjectId, page }),
+    saveTextbook: (input) => ipcRenderer.invoke("subject:saveTextbook", input),
+    saveTextbookPage: (input) => ipcRenderer.invoke("subject:saveTextbookPage", input),
+    saveTextbookPageImage: (input) => ipcRenderer.invoke("subject:saveTextbookPageImage", input),
+    saveTextbookFigures: (input) => ipcRenderer.invoke("subject:saveTextbookFigures", input),
+    mineruDetect: () => ipcRenderer.invoke("subject:mineruDetect"),
+    parseTextbookLocal: (input) => ipcRenderer.invoke("subject:parseTextbookLocal", input),
+    onMineruProgress: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("subject:mineruProgress", listener);
+      return () => ipcRenderer.removeListener("subject:mineruProgress", listener);
+    },
+    getPathForFile: (file) => {
+      try {
+        const { webUtils } = require("electron");
+        return webUtils.getPathForFile(file);
+      } catch {
+        return file?.path || "";
+      }
+    },
+    textbookProgress: (subjectId) => ipcRenderer.invoke("subject:textbookProgress", subjectId),
+    failTextbook: (input) => ipcRenderer.invoke("subject:failTextbook", input),
+    resetTextbook: (subjectId) => ipcRenderer.invoke("subject:resetTextbook", subjectId),
+    generateInventory: (input) => ipcRenderer.invoke("subject:generateInventory", input),
+    generateQuestions: (input) => ipcRenderer.invoke("subject:generateQuestions", input),
+    onQuestionsProgress: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("subject:questions:progress", listener);
+      return () => ipcRenderer.removeListener("subject:questions:progress", listener);
+    },
+  },
+
+  // 运行环境：MinerU / Python 真实检测 + 一键安装，Obsidian 安装状态
+  runtimeEnv: {
+    detect: (options = {}) => ipcRenderer.invoke("runtimeEnv:detect", options),
+    install: (input = {}) => ipcRenderer.invoke("runtimeEnv:install", input),
+    cancel: () => ipcRenderer.invoke("runtimeEnv:cancel"),
+    getState: () => ipcRenderer.invoke("runtimeEnv:state"),
+    choosePython: () => ipcRenderer.invoke("runtimeEnv:choosePython"),
+    useLegacy: (input = {}) => ipcRenderer.invoke("runtimeEnv:useLegacy", input),
+    onProgress: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("mineruEnv:progress", listener);
+      return () => ipcRenderer.removeListener("mineruEnv:progress", listener);
+    },
+  },
+
+  // 资料管理：主教材（权威）+ 补充资料（辅助）
+  materials: {
+    list: (subjectId) => ipcRenderer.invoke("materials:list", subjectId),
+    pickFiles: () => ipcRenderer.invoke("materials:pickFiles"),
+    pickPrimary: () => ipcRenderer.invoke("materials:pickPrimary"),
+    add: (input) => ipcRenderer.invoke("materials:add", input),
+    remove: (input) => ipcRenderer.invoke("materials:remove", input),
+    parse: (input) => ipcRenderer.invoke("materials:parse", input),
+    uploadPrimary: (input) => ipcRenderer.invoke("materials:uploadPrimary", input),
+    onChanged: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("materials:changed", listener);
+      return () => ipcRenderer.removeListener("materials:changed", listener);
+    },
+  },
+
   // AI API
   ai: {
     testConnection: (settings) => ipcRenderer.invoke("ai:testConnection", settings),
-    recognizeQuestions: (settings, imageBase64, mimeType) =>
-      ipcRenderer.invoke("ai:recognizeQuestions", { settings, imageBase64, mimeType }),
-    chat: (settings, messages) =>
-      ipcRenderer.invoke("ai:chat", { settings, messages }),
-    chatStreamStart: (settings, messages, requestId) =>
-      ipcRenderer.invoke("ai:chatStreamStart", { settings, messages, requestId }),
-    chatStreamCancel: (requestId) =>
-      ipcRenderer.invoke("ai:chatStreamCancel", requestId),
-    onChatStreamEvent: (handler) => {
+    transcribePage: (settings, imageBase64, mimeType, requestId, options = {}) =>
+      ipcRenderer.invoke("ai:transcribePage", { settings, imageBase64, mimeType, requestId, withFigures: Boolean(options.withFigures) }),
+    recognizeQuestions: (settings, imageBase64, mimeType, requestId) =>
+      ipcRenderer.invoke("ai:recognizeQuestions", { settings, imageBase64, mimeType, requestId }),
+    recognizeAnswers: (settings, imageBase64, mimeType, requestId) =>
+      ipcRenderer.invoke("ai:recognizeAnswers", { settings, imageBase64, mimeType, requestId }),
+    structureQuestionsFromText: (settings, text, options, requestId) =>
+      ipcRenderer.invoke("ai:structureQuestionsFromText", { settings, text, options, requestId }),
+    structureAnswersFromText: (settings, text, options, requestId) =>
+      ipcRenderer.invoke("ai:structureAnswersFromText", { settings, text, options, requestId }),
+    matchQuestionAnswers: (settings, questions, answers, options, requestId) =>
+      ipcRenderer.invoke("ai:matchQuestionAnswers", { settings, questions, answers, options, requestId }),
+    cancelRecognition: (requestId) => ipcRenderer.invoke("ai:cancelRecognition", requestId),
+    reclassifyPaper: (settings, paperId, options, requestId) =>
+      ipcRenderer.invoke("ai:reclassifyPaper", { settings, paperId, options, requestId }),
+    reclassifyQuestions: (settings, questionIds, options, requestId) =>
+      ipcRenderer.invoke("ai:reclassifyQuestions", { settings, questionIds, ...(options || {}), requestId }),
+    classifySubject: (settings, payload, requestId) =>
+      ipcRenderer.invoke("ai:classifySubject", { settings, ...(payload || {}), requestId }),
+    onReclassifyProgress: (handler) => {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);
-      ipcRenderer.on("ai:chatStream:event", listener);
-      return () => ipcRenderer.removeListener("ai:chatStream:event", listener);
+      ipcRenderer.on("ai:reclassify:progress", listener);
+      return () => ipcRenderer.removeListener("ai:reclassify:progress", listener);
     },
+    chat: (settings, messages, subjectId) =>
+      ipcRenderer.invoke("ai:chat", { settings, messages, subjectId }),
     generatePaper: (settings, config) =>
       ipcRenderer.invoke("ai:generatePaper", { settings, config }),
     gradeEssay: (settings, payload) =>
       ipcRenderer.invoke("ai:gradeEssay", { settings, payload }),
     recognizeEssay: (settings, imageBase64, mimeType) =>
       ipcRenderer.invoke("ai:recognizeEssay", { settings, imageBase64, mimeType }),
+    gradeHandwrittenAnswer: (settings, payload, imageBase64, mimeType) =>
+      ipcRenderer.invoke("ai:gradeHandwrittenAnswer", { settings, payload, imageBase64, mimeType }),
   }
 });

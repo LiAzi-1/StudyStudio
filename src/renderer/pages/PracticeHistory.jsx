@@ -24,7 +24,7 @@ export default function PracticeHistory({ onBack, onOpenRecord }) {
         const allRecords = await window.openexam.db.getPracticeRecords();
         const data = (allRecords || []).filter((record) => {
           const status = String(record?.status || '').toLowerCase();
-          return ['completed', 'ongoing', 'paused'].includes(status);
+          return ['completed', 'ongoing', 'paused', 'awaiting_review'].includes(status);
         });
         setRecords(data || []);
 
@@ -75,7 +75,7 @@ export default function PracticeHistory({ onBack, onOpenRecord }) {
   const filtered = records.filter((record) => {
     const status = String(record.status || '').toLowerCase();
     if (filter === 'completed') return status === 'completed';
-    if (filter === 'ongoing') return ['ongoing', 'paused'].includes(status);
+    if (filter === 'ongoing') return ['ongoing', 'paused', 'awaiting_review'].includes(status);
     return true;
   });
 
@@ -163,7 +163,8 @@ export default function PracticeHistory({ onBack, onOpenRecord }) {
         ) : (
           filtered.map((record, idx) => {
             const status = String(record.status || '').toLowerCase();
-            const ongoing = ['ongoing', 'paused'].includes(status);
+            const ongoing = ['ongoing', 'paused', 'awaiting_review'].includes(status);
+            const awaitingReview = status === 'awaiting_review';
             const title = record.meta?.title || record.paper_title || categoryNames[record.category] || record.category || '综合练习';
             return (
               <button
@@ -196,13 +197,13 @@ export default function PracticeHistory({ onBack, onOpenRecord }) {
                     <span className="hr-title">{title}</span>
                     <span className="hr-meta">
                       {formatDate(record.start_time || record.created_at)} · {record.total_count || 0}题 · {formatDuration(record.duration)}
-                      {ongoing ? ' · 未完成' : ''}
+                      {ongoing ? (awaitingReview ? ' · 待自评' : ' · 未完成') : ''}
                     </span>
                   </div>
                 </div>
                 <div className="hr-right">
                   <span className="hr-accuracy" style={{ color: ongoing ? 'var(--warning)' : (record.accuracy >= 60 ? 'var(--success)' : 'var(--danger)') }}>
-                    {ongoing ? '继续' : `${record.accuracy || 0}%`}
+                    {ongoing ? (awaitingReview ? '去自评' : '继续') : `${record.accuracy || 0}%`}
                   </span>
                   <span className="hr-score">{ongoing ? `${Object.keys(record.answers || {}).length}/${record.total_count || 0}` : `${record.correct_count || 0}/${record.total_count || 0}`}</span>
                 </div>

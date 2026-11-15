@@ -1,11 +1,47 @@
-import React, { useState, useEffect } from 'react';
-import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, getAIProvider, normalizeAISettings } from '../store/aiSettings.js';
-import CustomSelect from '../components/CustomSelect.jsx';
-import ProviderLogo from '../components/ProviderLogo.jsx';
-import appLogo from '../assets/openexam-logo.png';
+import React, { useState, useEffect, useRef } from 'react';
+import { DEFAULT_AI_SETTINGS, normalizeAISettings } from '../store/aiSettings.js';
+import AIConfigPanel from '../components/AIConfigPanel.jsx';
+import RuntimeEnvPanel from '../components/RuntimeEnvPanel.jsx';
+import appLogo from '../assets/openexam-app-icon.png';
 import { useDialog } from '../components/DialogProvider.jsx';
+import {
+  getFontScale,
+  setFontScale,
+  resetFontScale,
+  DEFAULT_FONT_SCALE,
+  FONT_SCALE_MIN,
+  FONT_SCALE_MAX,
+  FONT_SCALE_STEP,
+  FONT_SCALE_PRESETS,
+  QUESTION_FONT_SCALE_KEY,
+} from '../../shared/displaySettings.js';
 
-const RESETTABLE_LOCAL_KEYS = ['openexam_settings', 'openexam_onboarding_done_v1', 'openexam_ai_active_session', 'openexam_question_context'];
+const RESETTABLE_LOCAL_KEYS = ['openexam_settings', 'openexam_onboarding_done_v1', 'openexam_ai_active_session', 'openexam_question_context', QUESTION_FONT_SCALE_KEY];
+
+const AVATAR_PREVIEW = 168;
+const AVATAR_OUTPUT = 256;
+
+const formatBytes = (bytes) => {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+};
+
+const formatBackupTime = (iso) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const loadImage = (src) => new Promise((resolve, reject) => {
+  const image = new Image();
+  image.onload = () => resolve(image);
+  image.onerror = () => reject(new Error('图片解析失败'));
+  image.src = src;
+});
 
 const NavIcon = ({ type }) => {
   const common = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
@@ -19,6 +55,15 @@ const NavIcon = ({ type }) => {
       </svg>
     );
   }
+  if (type === 'runtime') {
+    return (
+      <svg {...common}>
+        <rect x="3" y="4" width="18" height="7" rx="2" />
+        <rect x="3" y="13" width="18" height="7" rx="2" />
+        <path d="M7 7.5h.01M7 16.5h.01" />
+      </svg>
+    );
+  }
   if (type === 'import') {
     return (
       <svg {...common}>
@@ -26,6 +71,25 @@ const NavIcon = ({ type }) => {
         <path d="M14 2v6h6" />
         <path d="M12 18v-6" />
         <path d="M9 15l3 3 3-3" />
+      </svg>
+    );
+  }
+  if (type === 'user') {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="8.5" r="3.6" />
+        <path d="M5 20c0-3.4 3.1-5.6 7-5.6s7 2.2 7 5.6" />
+      </svg>
+    );
+  }
+  if (type === 'display') {
+    return (
+      <svg {...common}>
+        <path d="M4 7V5h16v2" />
+        <path d="M9 19h6" />
+        <path d="M12 5v14" />
+        <path d="M7 19v-3M17 19v-3" />
+        <path d="M7 9v6M17 9v6" />
       </svg>
     );
   }
@@ -47,7 +111,7 @@ const NavIcon = ({ type }) => {
   );
 };
 
-export default function Settings({ onBack }) {
+export default function Settings({ onBack, profile, initialSection = 'ai', onProfileSaved }) {
   const [settings, setSettings] = useState(DEFAULT_AI_SETTINGS);
   const [showKey, setShowKey] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
@@ -59,7 +123,174 @@ export default function Settings({ onBack }) {
   const [updateState, setUpdateState] = useState(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [backupBusy, setBackupBusy] = useState('');
+  const [localBackups, setLocalBackups] = useState(null);
+  const [fontScale, setFontScaleState] = useState(() => getFontScale());
+  const [nameValue, setNameValue] = useState(String(profile?.name || '考生用户'));
+  const [avatarPreview, setAvatarPreview] = useState(String(profile?.avatar || ''));
+  const [avatarSrc, setAvatarSrc] = useState('');
+  const [avatarNat, setAvatarNat] = useState({ w: 0, h: 0 });
+  const [avatarZoom, setAvatarZoom] = useState(1);
+  const [avatarOffset, setAvatarOffset] = useState({ x: 0, y: 0 });
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const avatarDragRef = useRef(null);
+  const avatarFileRef = useRef(null);
   const { alert: showAlert, confirm: showConfirm, toast: showToast } = useDialog();
+
+  useEffect(() => {
+    setNameValue(String(profile?.name || '考生用户'));
+    setAvatarPreview(String(profile?.avatar || ''));
+    setAvatarSrc('');
+    setAvatarNat({ w: 0, h: 0 });
+    setAvatarZoom(1);
+    setAvatarOffset({ x: 0, y: 0 });
+  }, [profile?.name, profile?.avatar]);
+
+  useEffect(() => {
+    if (initialSection) setActiveSection(initialSection);
+  }, [initialSection]);
+
+  // 进入「数据管理」时读取本地备份列表；备份/恢复后会主动刷新
+  useEffect(() => {
+    if (activeSection !== 'data') return undefined;
+    let mounted = true;
+    const loadLocalBackups = async () => {
+      try {
+        const result = await window.openexam?.db?.listLocalBackups?.();
+        if (mounted && result?.success) setLocalBackups(result);
+      } catch (error) {
+        console.error('读取本地备份列表失败:', error);
+      }
+    };
+    loadLocalBackups();
+    return () => { mounted = false; };
+  }, [activeSection]);
+
+  const avatarBaseScale = avatarNat.w && avatarNat.h ? AVATAR_PREVIEW / Math.min(avatarNat.w, avatarNat.h) : 1;
+  const avatarDrawW = avatarNat.w * avatarBaseScale * avatarZoom;
+  const avatarDrawH = avatarNat.h * avatarBaseScale * avatarZoom;
+
+  const clampAvatarOffset = (offset, zoomValue = avatarZoom) => {
+    if (!avatarNat.w || !avatarNat.h) return { x: 0, y: 0 };
+    const width = avatarNat.w * avatarBaseScale * zoomValue;
+    const height = avatarNat.h * avatarBaseScale * zoomValue;
+    const maxX = Math.max(0, (width - AVATAR_PREVIEW) / 2);
+    const maxY = Math.max(0, (height - AVATAR_PREVIEW) / 2);
+    return {
+      x: Math.min(maxX, Math.max(-maxX, offset.x)),
+      y: Math.min(maxY, Math.max(-maxY, offset.y)),
+    };
+  };
+
+  const handleAvatarFile = async (file) => {
+    if (!file) return;
+    if (!/^image\//.test(file.type)) {
+      await showAlert({ title: '无法使用该文件', message: '请选择 PNG、JPG 或 WebP 图片。', tone: 'warning' });
+      return;
+    }
+    setAvatarBusy(true);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('读取图片失败'));
+        reader.readAsDataURL(file);
+      });
+      const image = await loadImage(dataUrl);
+      setAvatarSrc(dataUrl);
+      setAvatarNat({ w: image.naturalWidth, h: image.naturalHeight });
+      setAvatarZoom(1);
+      setAvatarOffset({ x: 0, y: 0 });
+    } catch (error) {
+      await showAlert({ title: '读取图片失败', message: error.message || '请换一张图片重试。', tone: 'danger' });
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const buildAvatarDataUrl = async () => {
+    if (!avatarSrc) return avatarPreview;
+    const image = await loadImage(avatarSrc);
+    const canvas = document.createElement('canvas');
+    canvas.width = AVATAR_OUTPUT;
+    canvas.height = AVATAR_OUTPUT;
+    const ctx = canvas.getContext('2d');
+    const ratio = AVATAR_OUTPUT / AVATAR_PREVIEW;
+    ctx.fillStyle = '#e8f3ed';
+    ctx.fillRect(0, 0, AVATAR_OUTPUT, AVATAR_OUTPUT);
+    ctx.drawImage(
+      image,
+      ((AVATAR_PREVIEW - avatarDrawW) / 2 + avatarOffset.x) * ratio,
+      ((AVATAR_PREVIEW - avatarDrawH) / 2 + avatarOffset.y) * ratio,
+      avatarDrawW * ratio,
+      avatarDrawH * ratio,
+    );
+    return canvas.toDataURL('image/jpeg', 0.9);
+  };
+
+  const handleApplyAvatar = async () => {
+    if (!avatarSrc) return;
+    const next = await buildAvatarDataUrl();
+    setAvatarPreview(next);
+    setAvatarSrc('');
+    setAvatarNat({ w: 0, h: 0 });
+    setAvatarZoom(1);
+    setAvatarOffset({ x: 0, y: 0 });
+  };
+
+  const handleClearAvatar = () => {
+    setAvatarPreview('');
+    setAvatarSrc('');
+    setAvatarNat({ w: 0, h: 0 });
+  };
+
+  const handleSaveProfile = async () => {
+    const nextName = String(nameValue || '').replace(/\s+/g, ' ').trim().slice(0, 24) || '考生用户';
+    try {
+      const avatar = await buildAvatarDataUrl();
+      let saved = { name: nextName, avatar };
+      if (window.openexam?.app?.saveProfile) {
+        const result = await window.openexam.app.saveProfile(saved);
+        if (result?.profile) saved = result.profile;
+      }
+      setNameValue(saved.name);
+      setAvatarPreview(saved.avatar || '');
+      setAvatarSrc('');
+      onProfileSaved?.(saved);
+      showToast({ title: '个人资料已保存', message: '顶部与侧栏的头像会立即更新。', tone: 'success' });
+    } catch (error) {
+      await showAlert({ title: '保存失败', message: error.message || '未知错误', tone: 'danger' });
+    }
+  };
+
+  const handleAvatarPointerDown = (event) => {
+    if (!avatarSrc) return;
+    avatarDragRef.current = { x: event.clientX, y: event.clientY, offset: avatarOffset };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const handleAvatarPointerMove = (event) => {
+    const start = avatarDragRef.current;
+    if (!start) return;
+    setAvatarOffset(clampAvatarOffset({
+      x: start.offset.x + event.clientX - start.x,
+      y: start.offset.y + event.clientY - start.y,
+    }));
+  };
+
+  const handleAvatarPointerUp = () => {
+    avatarDragRef.current = null;
+  };
+
+  const handleFontScaleChange = (next) => {
+    const applied = setFontScale(next);
+    setFontScaleState(applied);
+  };
+
+  const handleResetFontScale = () => {
+    const applied = resetFontScale();
+    setFontScaleState(applied);
+    showToast({ title: '已恢复默认', message: '文字大小已还原为标准。', tone: 'success' });
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -297,28 +528,6 @@ export default function Settings({ onBack }) {
     });
   };
 
-  const handleProviderChange = (providerId) => {
-    const provider = getAIProvider(providerId);
-    setSettings(prev => {
-      const isSameProvider = prev.aiProvider === providerId;
-      const nextBase = isSameProvider
-        ? prev.apiBase
-        : (provider?.baseUrl || prev.apiBase || '');
-      const nextModel = isSameProvider
-        ? prev.model
-        : (provider?.models?.[0] || prev.model || '');
-
-      return normalizeAISettings({
-        ...prev,
-        aiProvider: providerId,
-        apiBase: nextBase,
-        model: nextModel,
-        customModel: providerId === 'custom' ? prev.customModel : '',
-        apiFormat: provider?.defaultFormat || prev.apiFormat,
-      });
-    });
-  };
-
   const handleExportAllData = async () => {
     if (backupBusy) return;
 
@@ -423,11 +632,68 @@ export default function Settings({ onBack }) {
     }
   };
 
-  const currentProvider = getAIProvider(settings.aiProvider);
+  const handleCreateLocalBackup = async () => {
+    if (backupBusy) return;
+    if (!window.openexam?.db?.createLocalBackup) {
+      await showAlert({ title: '暂不支持', message: '当前环境不支持本地备份。', tone: 'warning' });
+      return;
+    }
+    try {
+      setBackupBusy('local');
+      const result = await window.openexam.db.createLocalBackup();
+      if (!result?.success) throw new Error(result?.error || '备份失败');
+      setLocalBackups(result);
+      showToast({
+        title: '备份完成',
+        message: result.backup?.name ? `${result.backup.name}（${formatBytes(result.backup.size)}）` : '已生成本地备份',
+        tone: 'success',
+      });
+    } catch (error) {
+      await showAlert({ title: '备份失败', message: error.message || '未知错误', tone: 'danger' });
+    } finally {
+      setBackupBusy('');
+    }
+  };
+
+  const handleRestoreLocalBackup = async (backup) => {
+    if (backupBusy) return;
+    if (!window.openexam?.db?.restoreLocalBackup) {
+      await showAlert({ title: '暂不支持', message: '当前环境不支持从本地备份恢复。', tone: 'warning' });
+      return;
+    }
+
+    const confirmed = await showConfirm({
+      title: '从本地备份恢复',
+      message: `将用 ${formatBackupTime(backup.createdAt)} 的${backup.kind === 'auto' ? '自动' : '手动'}备份覆盖当前数据库（题库、练习记录、错题、设置与 AI 会话等）。备份之后产生的改动会丢失，是否继续？`,
+      confirmText: '确认恢复',
+      cancelText: '取消',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+
+    try {
+      setBackupBusy('restore');
+      const result = await window.openexam.db.restoreLocalBackup(backup.name);
+      if (!result?.success) throw new Error(result?.error || '恢复失败');
+      await showAlert({
+        title: '恢复完成',
+        message: `已加载 ${formatBackupTime(backup.createdAt)} 的数据，点击确定后界面会自动刷新。`,
+        tone: 'success',
+      });
+      window.location.reload();
+    } catch (error) {
+      await showAlert({ title: '恢复失败', message: error.message || '未知错误', tone: 'danger' });
+    } finally {
+      setBackupBusy('');
+    }
+  };
 
   const navItems = [
+    { id: 'profile', label: '个人资料', icon: <NavIcon type="user" /> },
     { id: 'ai', label: 'AI 模型', icon: <NavIcon type="ai" /> },
+    { id: 'runtime', label: '运行环境', icon: <NavIcon type="runtime" /> },
     { id: 'import', label: '导入设置', icon: <NavIcon type="import" /> },
+    { id: 'display', label: '显示设置', icon: <NavIcon type="display" /> },
     { id: 'data', label: '数据管理', icon: <NavIcon type="data" /> },
     { id: 'about', label: '关于', icon: <NavIcon type="about" /> },
   ];
@@ -472,196 +738,121 @@ export default function Settings({ onBack }) {
 
         {/* Content Area */}
         <div style={{ display: "flex", flexDirection: "column", gap: 24, overflow: "auto", paddingRight: 8 }}>
-          {activeSection === 'ai' && (
+          {activeSection === 'profile' && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
               <div>
-                <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>AI 模型配置</h3>
-                <p style={{ fontSize: 12, color: "var(--muted)" }}>配置 AI 服务后，可使用智能 OCR 识别导入试卷，并支持 AI 错题解析</p>
+                <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>个人资料</h3>
+                <p style={{ fontSize: 12, color: "var(--muted)" }}>名字和头像只保存在本机数据库，重启或重装后仍会保留。</p>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 12 }}>
-                {AI_PROVIDERS.map(provider => (
-                  <button key={provider.id} onClick={() => handleProviderChange(provider.id)}
-                    style={{
-                      display: "flex", flexDirection: "column", alignItems: "center", gap: 10, padding: "16px 10px", borderRadius: 10, border: "1px solid", cursor: "pointer", transition: "all 0.2s",
-                      ...(settings.aiProvider === provider.id ? { background: "var(--accent-soft-bg)", borderColor: "var(--accent)", color: "var(--text)", boxShadow: "0 10px 22px rgba(15,23,42,0.06)" } : { background: "var(--surface)", borderColor: "var(--line)", color: "var(--muted)" })
-                    }}
+              <div className="profile-editor">
+                <div className="profile-avatar-col">
+                  <div
+                    className={`profile-avatar-preview${avatarSrc ? " is-cropping" : ""}`}
+                    onPointerDown={handleAvatarPointerDown}
+                    onPointerMove={handleAvatarPointerMove}
+                    onPointerUp={handleAvatarPointerUp}
+                    onPointerCancel={handleAvatarPointerUp}
                   >
-                    <div className="provider-logo-wrap" style={{ color: settings.aiProvider === provider.id ? "var(--accent)" : "inherit" }}>
-                      <ProviderLogo type={provider.icon} size={20} />
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: settings.aiProvider === provider.id ? 600 : 500 }}>
-                      {provider.name}
-                      {provider.supportsVision && <span style={{ fontSize: 9, padding: "2px 4px", borderRadius: 4, background: "var(--accent-soft-bg)", color: "var(--accent)" }}>视觉</span>}
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {settings.aiProvider && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "16px 0", background: "transparent", borderRadius: 0, borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)" }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>API Key</label>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input type={showKey ? "text" : "password"} value={settings.apiKey} onChange={(e) => setSettings(prev => ({ ...prev, apiKey: e.target.value }))} placeholder="sk-..."
-                        style={{ flex: 1, padding: "8px 12px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", fontSize: 13, outline: "none", color: "var(--text)" }}
+                    {avatarSrc ? (
+                      <img
+                        src={avatarSrc}
+                        alt=""
+                        draggable={false}
+                        style={{
+                          width: avatarDrawW,
+                          height: avatarDrawH,
+                          left: (AVATAR_PREVIEW - avatarDrawW) / 2 + avatarOffset.x,
+                          top: (AVATAR_PREVIEW - avatarDrawH) / 2 + avatarOffset.y,
+                        }}
                       />
-                      <button onClick={() => setShowKey(!showKey)} style={{ width: 36, height: 36, borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", color: "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer" }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          {showKey ? <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></> : <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>}
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>Base URL</label>
-                    <input type="text" value={settings.apiBase} onChange={(e) => setSettings(prev => ({ ...prev, apiBase: e.target.value }))} placeholder={currentProvider?.baseUrl || '输入 API 地址'}
-                      style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", fontSize: 13, outline: "none", color: "var(--text)" }}
-                    />
-                  </div>
-
-                  {currentProvider?.sdkType !== 'anthropic' && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>接口格式</label>
-                      <CustomSelect
-                        value={settings.apiFormat}
-                        onChange={(nextValue) => setSettings(prev => normalizeAISettings({ ...prev, apiFormat: nextValue }))}
-                        options={(currentProvider?.supportedFormats || []).map((format) => ({
-                          value: format,
-                          label: format === 'responses'
-                            ? 'Responses API'
-                            : format === 'chat_completions'
-                              ? 'Chat Completions API'
-                              : format,
-                        }))}
-                      />
-                    </div>
-                  )}
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <label style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>模型</label>
-                    {settings.aiProvider === 'custom' ? (
-                      <input type="text" value={settings.customModel} onChange={(e) => setSettings(prev => ({ ...prev, customModel: e.target.value }))} placeholder="输入模型名称"
-                        style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", fontSize: 13, outline: "none", color: "var(--text)" }}
-                      />
+                    ) : avatarPreview ? (
+                      <img src={avatarPreview} alt="" />
                     ) : (
-                      <CustomSelect
-                        value={settings.model}
-                        onChange={(nextValue) => setSettings(prev => ({ ...prev, model: nextValue }))}
-                        options={(currentProvider?.models || []).map((model) => ({ value: model, label: model }))}
-                      />
+                      <span className="profile-avatar-letter">{Array.from(nameValue.trim())[0] || "考"}</span>
                     )}
                   </div>
 
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
-                    <button onClick={handleTest} disabled={testStatus === 'testing'} style={{ flex: 1, padding: "10px 0", borderRadius: 6, border: "1px solid var(--accent)", background: "transparent", color: "var(--accent)", fontSize: 13, fontWeight: 600, cursor: testStatus === 'testing' ? "wait" : "pointer" }}>
-                      {testStatus === 'testing' ? '测试中...' : testStatus === 'success' ? '✓ 连接成功' : testStatus === 'error' ? '× 连接失败' : '测试连接'}
+                  <div className="profile-avatar-actions">
+                    <button type="button" className="profile-btn" onClick={() => avatarFileRef.current?.click()} disabled={avatarBusy}>
+                      {avatarBusy ? "读取中…" : "选择图片"}
                     </button>
-                    <button onClick={handleSave} style={{ flex: 1, padding: "10px 0", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", boxShadow: "0 8px 18px rgba(15,23,42,0.08)" }}>
-                      {testStatus === 'saved' ? '已保存 ✓' : '保存配置'}
-                    </button>
+                    {avatarSrc && (
+                      <button type="button" className="profile-btn is-primary" onClick={handleApplyAvatar}>应用裁剪</button>
+                    )}
+                    {!avatarSrc && avatarPreview && (
+                      <button type="button" className="profile-btn" onClick={handleClearAvatar}>移除头像</button>
+                    )}
                   </div>
+                  <input
+                    ref={avatarFileRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    style={{ display: "none" }}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      handleAvatarFile(file);
+                    }}
+                  />
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-                    <div style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--surface)" }}>
-                      <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>配置存储</div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: persistStatus === 'sqlite' ? 'var(--success)' : 'var(--text)' }}>
-                        {persistStatus === 'loading' ? '读取中...' : persistStatus === 'sqlite' ? 'SQLite 持久化' : '仅本地缓存'}
-                      </div>
-                      <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>
-                        最近保存: {formatTime(lastSavedAt)}
-                      </div>
-                    </div>
-                    <div style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--surface)" }}>
-                      <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>连接状态</div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: connectionState?.status === 'success' ? 'var(--success)' : connectionState?.status === 'error' ? 'var(--danger)' : 'var(--text)' }}>
-                        {connectionState?.status === 'success' ? '已验证可用' : connectionState?.status === 'error' ? '验证失败' : '未验证'}
-                      </div>
-                      <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>
-                        最近验证: {formatTime(connectionState?.checkedAt)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={{ marginTop: 18, paddingTop: 18, borderTop: '1px dashed var(--line)', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', marginBottom: 4 }}>文档识别引擎</div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.7 }}>引擎 A 复用当前 AI 模型；引擎 B 用独立 OCR 服务，适合扫描 PDF 或复杂版式。</div>
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-                      {[
-                        ['auto', '自动选择'],
-                        ['ai', '仅 AI 引擎'],
-                        ['ocr', '仅 OCR 引擎'],
-                      ].map(([key, label]) => (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => setSettings(prev => ({ ...prev, recognizeEngine: key }))}
-                          style={{ padding: '10px 12px', borderRadius: 8, border: settings.recognizeEngine === key ? '1px solid var(--accent)' : '1px solid var(--line)', background: settings.recognizeEngine === key ? 'var(--accent-soft-bg)' : 'var(--surface)', color: settings.recognizeEngine === key ? 'var(--accent)' : 'var(--text)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>PDF 最大识别页数</label>
+                  {avatarSrc && (
+                    <label className="profile-zoom">
+                      <span>缩放</span>
                       <input
-                        type="number"
+                        type="range"
                         min="1"
-                        max="20"
-                        value={settings.pdfMaxPages}
-                        onChange={(e) => setSettings(prev => ({ ...prev, pdfMaxPages: e.target.value }))}
-                        style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid var(--line)', background: 'var(--surface)', fontSize: 13, outline: 'none', color: 'var(--text)' }}
+                        max="3"
+                        step="0.01"
+                        value={avatarZoom}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          setAvatarZoom(next);
+                          setAvatarOffset((prev) => clampAvatarOffset(prev, next));
+                        }}
                       />
-                    </div>
-
-                    <div style={{ marginTop: 4, padding: '14px', borderRadius: 10, background: 'var(--surface-soft)', border: '1px solid var(--line)', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>OCR 引擎 B</div>
-                          <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.7 }}>可接第三方 OCR URL。建议你的 OCR 服务返回 <code>{'{ questions: [...] }'}</code>，或返回纯文本再交给系统解析。</div>
-                        </div>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text)', cursor: 'pointer' }}>
-                          <input type="checkbox" checked={Boolean(settings.ocrEnabled)} onChange={(e) => setSettings(prev => ({ ...prev, ocrEnabled: e.target.checked }))} />
-                          启用 OCR
-                        </label>
-                      </div>
-
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>OCR URL</label>
-                          <input type="text" value={settings.ocrApiUrl} onChange={(e) => setSettings(prev => ({ ...prev, ocrApiUrl: e.target.value }))} placeholder="https://your-ocr.example.com/recognize"
-                            style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid var(--line)', background: 'var(--surface)', fontSize: 13, outline: 'none', color: 'var(--text)' }}
-                          />
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>OCR Key</label>
-                          <input type={showKey ? 'text' : 'password'} value={settings.ocrApiKey} onChange={(e) => setSettings(prev => ({ ...prev, ocrApiKey: e.target.value }))} placeholder="可选"
-                            style={{ padding: '8px 12px', borderRadius: 6, border: '1px solid var(--line)', background: 'var(--surface)', fontSize: 13, outline: 'none', color: 'var(--text)' }}
-                          />
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text)' }}>OCR 返回格式</label>
-                        <CustomSelect
-                          value={settings.ocrResponseMode}
-                          onChange={(nextValue) => setSettings(prev => ({ ...prev, ocrResponseMode: nextValue }))}
-                          options={[
-                            { value: 'json_questions', label: '返回结构化题目 JSON' },
-                            { value: 'text', label: '返回纯文本，再交给 AI 结构化' },
-                          ]}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                    </label>
+                  )}
+                  <p className="profile-hint">
+                    {avatarSrc ? "拖动图片调位置，滑杆缩放，圆内就是最终头像。" : "支持 PNG / JPG / WebP，建议使用正方形图片。"}
+                  </p>
                 </div>
-              )}
+
+                <div className="profile-fields">
+                  <label htmlFor="profile-name">名字</label>
+                  <input
+                    id="profile-name"
+                    value={nameValue}
+                    maxLength={24}
+                    placeholder="例如：小林"
+                    onChange={(event) => setNameValue(event.target.value)}
+                  />
+                  <p className="profile-hint">显示在右上角与头像旁，最多 24 个字。</p>
+                  <button type="button" className="profile-btn is-primary" onClick={handleSaveProfile} style={{ alignSelf: "flex-start", marginTop: 6 }}>
+                    保存资料
+                  </button>
+                </div>
+              </div>
             </div>
+          )}
+
+          {activeSection === 'ai' && (
+            <AIConfigPanel
+              settings={settings}
+              onChange={setSettings}
+              onSave={handleSave}
+              onTestBase={handleTest}
+              baseTestStatus={testStatus}
+              persistStatus={persistStatus}
+              connectionState={connectionState}
+              lastSavedAt={lastSavedAt}
+              showKey={showKey}
+              setShowKey={setShowKey}
+            />
+          )}
+
+          {activeSection === 'runtime' && (
+            <RuntimeEnvPanel />
           )}
 
           {activeSection === 'import' && (
@@ -689,6 +880,98 @@ export default function Settings({ onBack }) {
             </div>
           )}
 
+          {activeSection === 'display' && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div>
+                <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>显示设置</h3>
+                <p style={{ fontSize: 12, color: "var(--muted)" }}>仅调整题目文字大小（题干、选项、解析、答案），界面其余部分保持不变，设置会立即生效并自动保存</p>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "18px 0", borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "var(--text)" }}>题目字体大小</h4>
+                    <p style={{ fontSize: 11, color: "var(--muted)", margin: 0 }}>作用于做题、对答案、错题本中的题目文字，当前 {Math.round(fontScale * 100)}%</p>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {FONT_SCALE_PRESETS.map((preset) => {
+                      const active = Math.abs(fontScale - preset.value) < 0.001;
+                      return (
+                        <button
+                          key={preset.id}
+                          onClick={() => handleFontScaleChange(preset.value)}
+                          style={{
+                            padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600, transition: "all 0.2s", border: active ? "1px solid var(--accent)" : "1px solid var(--line)",
+                            background: active ? "var(--accent)" : "var(--surface)", color: active ? "#fff" : "var(--text)",
+                          }}
+                          onMouseOver={e => { if (!active) e.currentTarget.style.background = "var(--surface-soft)"; }}
+                          onMouseOut={e => { if (!active) e.currentTarget.style.background = "var(--surface)"; }}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>标准 {Math.round(FONT_SCALE_MIN * 100)}%</span>
+                  <input
+                    type="range"
+                    min={FONT_SCALE_MIN}
+                    max={FONT_SCALE_MAX}
+                    step={FONT_SCALE_STEP}
+                    value={fontScale}
+                    onChange={(e) => handleFontScaleChange(parseFloat(e.target.value))}
+                    style={{ flex: 1, accentColor: "var(--accent)", cursor: "pointer" }}
+                  />
+                  <span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>超大 {Math.round(FONT_SCALE_MAX * 100)}%</span>
+                  <span style={{ minWidth: 48, textAlign: "right", fontSize: 13, fontWeight: 700, color: "var(--accent)" }}>{Math.round(fontScale * 100)}%</span>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
+                    提示：仅题目文字放大，按钮、导航与间距不变。
+                  </div>
+                  <button
+                    onClick={handleResetFontScale}
+                    disabled={Math.abs(fontScale - DEFAULT_FONT_SCALE) < 0.001}
+                    style={{
+                      padding: "8px 14px", borderRadius: 8, border: "1px solid var(--line)", background: "transparent", color: "var(--muted)", fontSize: 12, fontWeight: 600,
+                      cursor: Math.abs(fontScale - DEFAULT_FONT_SCALE) < 0.001 ? "not-allowed" : "pointer", opacity: Math.abs(fontScale - DEFAULT_FONT_SCALE) < 0.001 ? 0.5 : 1,
+                    }}
+                  >
+                    恢复默认
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <h4 style={{ fontSize: 13, fontWeight: 600, margin: 0, color: "var(--text)" }}>预览（题目实际显示效果）</h4>
+                <div
+                  style={{
+                    padding: "18px 20px", borderRadius: 14, background: "var(--surface-soft)", border: "1px solid var(--line)",
+                    display: "flex", flexDirection: "column", gap: 10, pointerEvents: "none",
+                    fontSize: "calc(15px * var(--question-font-scale, 1))",
+                  }}
+                >
+                  <div style={{ fontWeight: 500, lineHeight: 1.85, color: "var(--text)" }}>
+                    1. 下列关于函数 <span style={{ fontWeight: 600 }}>f(x) = x² + 2x</span> 的说法正确的是：
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, lineHeight: 1.7, color: "var(--text)" }}>
+                    <div>A. 函数在 x = 0 处取得最小值</div>
+                    <div>B. 函数的图象关于 y 轴对称</div>
+                    <div>C. 函数在区间 [0, +∞) 上单调递增</div>
+                    <div>D. 函数没有零点</div>
+                  </div>
+                  <div style={{ fontSize: "0.8em", lineHeight: 1.7, color: "var(--muted)" }}>
+                    【答案】C　【解析】f(x) = (x + 1)² − 1，对称轴 x = −1，在 [0, +∞) 上单调递增。
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeSection === 'data' && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
               <div>
@@ -700,6 +983,69 @@ export default function Settings({ onBack }) {
                 {['练习记录', '错题进度', 'AI 会话', 'AI 配置', '自定义试卷', '导入题库'].map((item) => (
                   <span key={item} style={{ padding: "0", borderRadius: 0, background: "transparent", border: "none", fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>{item}</span>
                 ))}
+              </div>
+
+              <div style={{ borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)", padding: "18px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <h4 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 4px 0", color: "var(--text)" }}>本地自动备份</h4>
+                    <p style={{ fontSize: 11, color: "var(--muted)", margin: 0, lineHeight: 1.7 }}>
+                      启动时每天自动备份一次，数据库以 SQLite 在线快照保存（包含 WAL 中尚未合并的数据，不用停用应用）。
+                      最多保留 {localBackups?.limits?.maxCount ?? 10} 份且总大小不超过 {formatBytes(localBackups?.limits?.maxBytes ?? 1024 * 1024 * 1024)}，超出后从最旧的开始淘汰。
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const result = await window.openexam?.db?.listLocalBackups?.();
+                          if (result?.success) setLocalBackups(result);
+                        } catch (error) {
+                          console.error('刷新本地备份列表失败:', error);
+                        }
+                      }}
+                      disabled={!!backupBusy}
+                      style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", color: "var(--muted)", fontSize: 12, fontWeight: 600, cursor: backupBusy ? "not-allowed" : "pointer" }}
+                    >刷新</button>
+                    <button
+                      type="button"
+                      onClick={handleCreateLocalBackup}
+                      disabled={!!backupBusy}
+                      style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: backupBusy ? "wait" : "pointer", opacity: backupBusy ? 0.7 : 1 }}
+                    >{backupBusy === 'local' ? '正在备份…' : '立即备份'}</button>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11, color: "var(--muted)" }}>
+                  <span>当前占用 <strong style={{ color: "var(--text)" }}>{formatBytes(localBackups?.totalBytes)}</strong> / {formatBytes(localBackups?.limits?.maxBytes ?? 1024 * 1024 * 1024)}</span>
+                  <span>共 {localBackups?.count ?? 0} 份</span>
+                  <span style={{ wordBreak: "break-all" }}>目录：{localBackups?.directory || '读取中…'}</span>
+                </div>
+
+                {localBackups === null ? (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>正在读取备份列表…</div>
+                ) : (localBackups.backups || []).length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>还没有备份。点「立即备份」生成第一份，或下次启动时等待自动备份。</div>
+                ) : (
+                  <div>
+                    {(localBackups.backups || []).map((backup) => (
+                      <div key={backup.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--line)", fontSize: 12 }}>
+                        <span style={{ padding: "1px 6px", borderRadius: 999, fontSize: 10, fontWeight: 700, color: backup.kind === 'auto' ? 'var(--accent)' : 'var(--text)', background: backup.kind === 'auto' ? 'var(--accent-soft-bg)' : 'var(--surface-soft)' }}>
+                          {backup.kind === 'auto' ? '自动' : '手动'}
+                        </span>
+                        <span style={{ color: "var(--text)" }}>{formatBackupTime(backup.createdAt)}</span>
+                        <span style={{ marginLeft: "auto", color: "var(--muted)" }}>{formatBytes(backup.size)}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreLocalBackup(backup)}
+                          disabled={!!backupBusy}
+                          style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", color: "var(--text)", fontSize: 11, fontWeight: 600, cursor: backupBusy ? "not-allowed" : "pointer", opacity: backupBusy ? 0.6 : 1 }}
+                        >{backupBusy === 'restore' ? '恢复中…' : '恢复'}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 0, borderTop: "1px solid var(--line)" }}>
@@ -747,10 +1093,10 @@ export default function Settings({ onBack }) {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                    <h3 style={{ fontSize: 24, fontWeight: 700, margin: 0, color: "var(--text)", letterSpacing: "-0.5px" }}>OpenExam</h3>
+                    <h3 style={{ fontSize: 24, fontWeight: 700, margin: 0, color: "var(--text)", letterSpacing: "-0.5px" }}>StudyStudio</h3>
                     <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 700 }}>v{appInfo?.version || '0.2.0'}</span>
                   </div>
-                  <p style={{ fontSize: 13, color: "var(--muted)", margin: 0 }}>开源公考刷题应用 · 本地优先 · AI 助学</p>
+                  <p style={{ fontSize: 13, color: "var(--muted)", margin: 0 }}>考研智能学习空间 · 本地优先 · 多模型 AI 识图</p>
                   <div style={{ display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
                     <button type="button" onClick={() => handleOpenLink('https://github.com/lmk1010/OpenExam')} style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, padding: "0", borderRadius: 0, border: "none", background: "transparent", cursor: "pointer" }}>GitHub 仓库</button>
                     <button type="button" onClick={() => handleOpenLink('https://github.com/lmk1010/OpenExam/issues')} style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600, padding: "0", borderRadius: 0, border: "none", background: "transparent", cursor: "pointer" }}>反馈问题</button>

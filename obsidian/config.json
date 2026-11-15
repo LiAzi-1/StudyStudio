@@ -1,0 +1,39 @@
+{
+  "database": {
+    "path": "",
+    "fallbackToSeed": false,
+    "scanLegacyAppdata": false,
+    "appDataName": "studystudio"
+  },
+  "vision": {
+    "protocol": "openai",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "apiKey": "",
+    "model": "glm-4v-flash",
+    "temperature": 0.3,
+    "maxTokens": 4096,
+    "timeout": 120
+  },
+  "sync": {
+    "samplePerPoint": 12,
+    "maxQuestionsPerPoint": 120,
+    "contentLimit": 700
+  },
+  "import": {
+    "defaultCategory": "major",
+    "defaultSubCategory": "obsidian"
+  },
+  "tutor": {
+    "apiKey": "",
+    "baseUrl": "",
+    "model": "",
+    "protocol": "openai",
+    "maxTokens": 4096,
+    "timeout": 90
+  },
+  "mindmap": {
+    "canvasPath": "20-思维导图/知识地图.canvas",
+    "notePath": "20-思维导图/知识地图.md"
+  },
+  "pythonPath": ""
+}

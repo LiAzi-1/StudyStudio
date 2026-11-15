@@ -1,76 +1,61 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
 const STEPS = [
   {
-    id: "profile",
-    badge: "欢迎使用",
-    title: "先设置一个名字，开始你的备考空间",
-    description: "OpenExam 只在本地保存学习记录、错题和 AI 配置，名字仅用于本机展示。",
+    id: "library",
+    badge: "准备资料",
+    title: "先把科目和资料建起来",
+    description: "新建科目后，把教材或资料拖进窗口即可上传。Markdown / TXT / PPTX 开箱可用；PDF 需要先安装解析环境，可在「设置 → 运行环境」一键安装。",
     accent: "var(--accent)",
     points: [
-      "本地优先，打开即用，不依赖云端账号",
-      "支持题库练习、模拟考试、AI 出卷、错题复盘",
-      "先用昵称开始，稍后即可直接进入刷题",
+      "解析完成的资料会进入资料库，出卷和 AI 助教都能直接读到。",
+      "Obsidian 是可选依赖：不装也能正常记笔记、看知识图谱，只是打开文件时会改用系统默认程序。",
     ],
   },
   {
     id: "practice",
-    badge: "高频刷题",
-    title: "先从专项练习进入状态",
-    description: "按模块、子分类、题量与随机方式自由组合，快速切进每日刷题节奏。",
+    badge: "题库与练习",
+    title: "导入试卷，开始按科目练",
+    description: "题库支持导入整份试卷，也可以按科目做专项练习，或者来一场整卷模考。",
     accent: "var(--info)",
     points: [
-      "支持言语、数量、判断、资料、常识拆分训练",
-      "做题模式与背题模式都可直接开始",
-      "交卷后自动写入学习记录和成长数据",
+      "做错的题会自动进入错题本，方便回头重做。",
+      "练习和模考都会写进学习记录，进度看得见。",
     ],
-    cta: { label: "完成后打开题库练习", page: "practice", tab: "题库练习" },
   },
   {
-    id: "ai",
-    badge: "智能提效",
-    title: "AI 出卷、识别、讲解都准备好了",
-    description: "配置模型后，可识别图片/PDF、生成试卷、追问讲解，把练习闭环串起来。",
+    id: "assistant",
+    badge: "AI 助教",
+    title: "一个入口，两种用法",
+    description: "「答疑讲解」负责讲题和生成变式，「帮我做事」负责录题、写笔记、做分类。",
     accent: "var(--success)",
     points: [
-      "支持 OpenAI 兼容接口与多家模型服务商",
-      "AI 生成的试卷与练习可一键保存到本地",
-      "错题与当前题目可直接交给 AI 老师分析",
+      "会改动数据的动作都会先给出确认卡片，你点了才会执行。",
     ],
-    cta: { label: "完成后打开 AI 出卷", page: "ai-generate", tab: "AI出卷" },
   },
   {
-    id: "update",
-    badge: "持续更新",
-    title: "Release 更新也已经接入",
-    description: "启动后自动检查 GitHub Release。Windows 支持自动安装，macOS 会提示前往下载。",
+    id: "graph",
+    badge: "知识图谱与成长",
+    title: "看清每个章节的掌握情况",
+    description: "资料和题目分类后，知识图谱会按章节、知识点展示你的掌握程度。",
     accent: "var(--warning)",
     points: [
-      "设置页可查看当前版本与更新状态",
-      "可手动检查更新，及时获取新题库和功能",
-      "macOS 首次打开如被拦截，可按 Release 说明处理",
+      "薄弱点会随练习和错题更新，复盘时优先补这些地方。",
+      "成长数据记录每天的练习量，坚持比突击更有效。",
     ],
-    cta: { label: "完成后打开系统设置", page: "settings", tab: "" },
   },
 ];
 
-function renderVisual(step, name) {
-  if (step.id === "profile") {
+function renderVisual(step) {
+  if (step.id === "library") {
     return (
       <div className="onboarding-visual-plain">
-        <div className="onboarding-visual-kicker">Local first</div>
-        <div className="onboarding-visual-hero">
-          <span className="onboarding-visual-mark">{Array.from(name)[0] || "考"}</span>
-          <div>
-            <strong>{name}</strong>
-            <span>本地备考空间 · 打开即用</span>
-          </div>
-        </div>
+        <div className="onboarding-visual-kicker">Subjects & Files</div>
+        <strong className="onboarding-visual-title">高等数学 · 资料库</strong>
         <ul className="onboarding-visual-lines">
-          <li>95+ 精选试卷</li>
-          <li>1.5w+ 题目储备</li>
-          <li>AI 出卷与讲题</li>
-          <li>错题复盘闭环</li>
+          <li>高等数学讲义.pdf · 已解析</li>
+          <li>线性代数课件.pptx · 解析中</li>
+          <li>错题整理.md · 已就绪</li>
         </ul>
       </div>
     );
@@ -83,21 +68,22 @@ function renderVisual(step, name) {
         <strong className="onboarding-visual-title">判断推理 · 20 题</strong>
         <div className="onboarding-visual-meter"><span style={{ width: "78%" }} /></div>
         <ul className="onboarding-visual-lines">
-          <li>正确率 78%</li>
-          <li>已完成 126 题</li>
+          <li>整卷模考 · 120 分钟</li>
+          <li>错题本 14 题待重做</li>
           <li>今日练习 3 次</li>
         </ul>
       </div>
     );
   }
 
-  if (step.id === "ai") {
+  if (step.id === "assistant") {
     return (
       <div className="onboarding-visual-plain">
-        <div className="onboarding-visual-kicker">AI Tutor</div>
+        <div className="onboarding-visual-kicker">AI 助教</div>
         <div className="onboarding-visual-dialog">
-          <p className="is-user">这道图形推理怎么判断？</p>
-          <p className="is-ai">先看对称，再排除旋转规律不一致的选项。</p>
+          <p className="is-user">帮我把这道题录进题库</p>
+          <p className="is-ai">已整理成 1 道题，解析也写好了。</p>
+          <p className="is-ai">点「确认写入」之后才会保存。</p>
         </div>
       </div>
     );
@@ -105,30 +91,25 @@ function renderVisual(step, name) {
 
   return (
     <div className="onboarding-visual-plain">
-      <div className="onboarding-visual-kicker">Updates</div>
-      <strong className="onboarding-visual-title">GitHub Release</strong>
+      <div className="onboarding-visual-kicker">Knowledge Graph</div>
+      <strong className="onboarding-visual-title">高等数学 · 掌握度</strong>
+      <div className="onboarding-visual-meter"><span style={{ width: "64%" }} /></div>
       <ul className="onboarding-visual-lines">
-        <li>当前版本可手动检查</li>
-        <li>Windows 自动下载安装</li>
-        <li>macOS 检测并跳转下载</li>
+        <li>极限与连续 82%</li>
+        <li>多元函数微分 64%</li>
+        <li>级数 41% · 建议优先</li>
       </ul>
     </div>
   );
 }
 
-export default function OnboardingTour({ open, closing = false, defaultName = "考生用户", onFinish, onSkip, onNavigate }) {
+export default function OnboardingTour({ open, closing = false, onFinish, onSkip, onNavigate }) {
   const [step, setStep] = useState(0);
-  const [name, setName] = useState(defaultName);
 
   useEffect(() => {
     if (!open) return;
     setStep(0);
-    setName(String(defaultName || "考生用户").trim() || "考生用户");
-  }, [open, defaultName]);
-
-  const safeName = useMemo(() => {
-    return String(name || "").replace(/\s+/g, " ").trim().slice(0, 24) || "考生用户";
-  }, [name]);
+  }, [open]);
 
   const visible = open || closing;
   if (!visible) return null;
@@ -138,26 +119,26 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
 
   const handlePrimary = () => {
     if (isLast) {
-      onFinish?.({ name: safeName });
+      onFinish?.();
       return;
     }
     setStep((value) => Math.min(value + 1, STEPS.length - 1));
   };
 
   return (
-    <div className={`onboarding-overlay ${closing ? "is-closing" : ""}`} role="dialog" aria-modal="true" aria-label="首次引导">
+    <div className={`onboarding-overlay ${closing ? "is-closing" : ""}`} role="dialog" aria-modal="true" aria-label="使用说明">
       <div className="onboarding-shell" style={{ "--onboarding-accent": current.accent }}>
         <section key={`visual-${current.id}`} className="onboarding-showcase">
           <div className="onboarding-showcase-bg" />
           <div className="onboarding-showcase-head">
             <span>{current.badge}</span>
-            <strong>OpenExam</strong>
+            <strong>StudyStudio</strong>
           </div>
           <div className="onboarding-showcase-main">
-            {renderVisual(current, safeName)}
+            {renderVisual(current)}
           </div>
           <div className="onboarding-showcase-foot">
-            <span>引导 {step + 1} / {STEPS.length}</span>
+            <span>说明 {step + 1} / {STEPS.length}</span>
             <div className="onboarding-progress-track">
               <span style={{ width: `${((step + 1) / STEPS.length) * 100}%` }} />
             </div>
@@ -167,7 +148,7 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
         <section key={`panel-${current.id}`} className="onboarding-panel">
           <div className="onboarding-panel-top">
             <div className="onboarding-step-badge">Step {step + 1} / {STEPS.length}</div>
-            <button className="onboarding-skip" onClick={() => onSkip?.({ name: safeName })}>跳过</button>
+            <button className="onboarding-skip" onClick={() => onSkip?.()}>跳过</button>
           </div>
 
           <div className="onboarding-panel-body">
@@ -177,20 +158,6 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
               <p className="onboarding-desc">{current.description}</p>
             </div>
 
-            {current.id === "profile" && (
-              <label className="onboarding-input-wrap">
-                <span className="onboarding-input-label">怎么称呼你</span>
-                <input
-                  className="onboarding-input"
-                  value={name}
-                  maxLength={24}
-                  placeholder="例如：木木 / 小林 / 阿康"
-                  onChange={(event) => setName(event.target.value)}
-                />
-                <span className="onboarding-input-tip">仅用于本地展示，可稍后修改。</span>
-              </label>
-            )}
-
             <ul className="onboarding-feature-list">
               {current.points.map((point) => (
                 <li key={point} className="onboarding-feature-item">
@@ -199,12 +166,6 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
                 </li>
               ))}
             </ul>
-
-            {current.cta && (
-              <button className="onboarding-link-btn" onClick={() => onNavigate?.(current.cta)}>
-                {current.cta.label}
-              </button>
-            )}
           </div>
 
           <div className="onboarding-panel-bottom">
@@ -214,7 +175,7 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
                   key={item.id}
                   className={`onboarding-dot ${index === step ? "active" : ""}`}
                   onClick={() => setStep(index)}
-                  aria-label={`切换到第 ${index + 1} 步`}
+                  aria-label={`切换到第 ${index + 1} 页`}
                 />
               ))}
             </div>
@@ -227,7 +188,7 @@ export default function OnboardingTour({ open, closing = false, defaultName = "�
                 上一步
               </button>
               <button className="onboarding-btn primary" onClick={handlePrimary}>
-                {isLast ? "进入 OpenExam" : "下一步"}
+                {isLast ? "开始使用" : "下一步"}
               </button>
             </div>
           </div>

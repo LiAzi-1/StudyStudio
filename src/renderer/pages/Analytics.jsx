@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { getAISettings, isAIConfigured } from "../store/aiSettings.js";
+import { getRoleSettings, isRoleConfigured } from "../store/aiSettings.js";
 
 const CN = {
   yanyu: "言语理解",
@@ -7,6 +7,10 @@ const CN = {
   panduan: "判断推理",
   ziliao: "资料分析",
   changshi: "常识判断",
+  math: "数学",
+  english: "英语",
+  politics: "政治",
+  major: "专业课",
 };
 
 const PALETTES = {
@@ -199,7 +203,7 @@ export default function Analytics({ onOpenSettings, onStartRecommend, onStartPra
         ? c.accuracy
         : (c.total > 0 ? Math.round(((c.done || 0) / c.total) * 100) : 0);
       return {
-        name: CN[c.category] || c.category,
+        name: c.label || CN[c.category] || c.category,
         category: c.category,
         pct: mastery,
         completion: c.total > 0 ? Math.round(((c.done || 0) / c.total) * 100) : 0,
@@ -219,7 +223,7 @@ export default function Analytics({ onOpenSettings, onStartRecommend, onStartPra
     { label: "综合正确率", value: `${stats.accuracy}`,            unit: "%",  icon: ICONS.check, note: `正确 ${stats.correctCount} 道`, ...PALETTES.success },
     { label: "待攻克题目", value: stats.wrongCount.toLocaleString(), unit: "道", icon: ICONS.cross, note: "错误 / 跳过", ...PALETTES.danger },
   ];
-  const aiReady = isAIConfigured() && Boolean(window.openexam?.ai);
+  const aiReady = isRoleConfigured("assistant") && Boolean(window.openexam?.ai);
 
   const handleGenerateDiagnosis = async () => {
     if (!aiReady) {
@@ -246,7 +250,7 @@ export default function Analytics({ onOpenSettings, onStartRecommend, onStartPra
     setDiagnosisLoading(true);
     setDiagnosisError("");
     try {
-      const settings = getAISettings();
+      const settings = getRoleSettings("assistant");
       const result = await window.openexam.ai.chat(settings, [{ role: "user", content: prompt }]);
       if (result?.success && result.content) {
         setDiagnosis(result.content.trim());

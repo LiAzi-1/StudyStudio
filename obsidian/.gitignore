@@ -1,0 +1,16 @@
+# 自动生成 / 本地私密数据，不入库
+.cache/
+backups/
+outbox/
+state.json
+config.local.json
+vault/.obsidian/workspace.json
+vault/.obsidian/workspace-mobile.json
+vault/.obsidian/cache
+vault/90-题库/
+vault/_bridge/index/
+vault/_bridge/requests/
+vault/_bridge/outbox/
+vault/99-附件/
+!vault/_bridge/requests/.gitkeep
+!vault/_bridge/outbox/.gitkeep

@@ -3,14 +3,29 @@ const createAliasMap = (groups) => Object.fromEntries(
 );
 
 const CATEGORY_ALIASES = createAliasMap({
+  math: ['math', '数学', '数学一', '数学二', '数学三', '考研数学'],
+  english: ['english', '英语', '英语一', '英语二', '考研英语'],
+  politics: ['politics', '政治', '考研政治'],
+  major: ['major', '专业课', '专业课综合', '专业课一', '专业课二'],
   yanyu: ['yanyu', '言语理解', '言语'],
   shuliang: ['shuliang', '数量关系', '数量'],
   panduan: ['panduan', '判断推理', '判断'],
   ziliao: ['ziliao', '资料分析', '资料'],
-  changshi: ['changshi', '常识判断', '常识', '政治', '经济', '法律', '科技', '人文', '地理'],
+  changshi: ['changshi', '常识判断', '常识', '经济', '法律', '科技', '人文', '地理'],
 });
 
 const SUBCATEGORY_ALIASES = createAliasMap({
+  gaoshu: ['gaoshu', '高等数学', '微积分', '高数'],
+  daishu: ['daishu', '线性代数', '线代'],
+  gaiilv: ['gaiilv', '概率论与数理统计', '概率论'],
+  wanxing: ['wanxing', '完形填空'],
+  yuedu: ['yuedu', '阅读理解'],
+  fanyi: ['fanyi', '翻译'],
+  xiezuo: ['xiezuo', '英语写作', '作文'],
+  makesi: ['makesi', '马克思主义基本原理', '马原'],
+  maogai: ['maogai', '毛泽东思想和中国特色社会主义理论体系', '毛中特'],
+  shixi: ['shixi', '思想道德与法治', '思修'],
+  shiju: ['shiju', '形势与政策', '时政'],
   xuanci: ['xuanci', '逻辑填空', '逻辑题空', '选词填空'],
   yueduan: ['yueduan', '中心理解', '细节判断', '标题填入', '推断下文', '词句理解', '片段阅读'],
   yuju: ['yuju', '语句填空', '语句排序', '病语', '病句', '歧义句', '语句表达'],
@@ -34,15 +49,21 @@ const SUBCATEGORY_ALIASES = createAliasMap({
   dili: ['dili', '地理国情', '地理'],
 });
 
-const SUBCATEGORY_CATEGORY_MAP = { xuanci: 'yanyu', yueduan: 'yanyu', yuju: 'yanyu', wenzhang: 'yanyu', jisuan: 'shuliang', tuili: 'shuliang', tuxing: 'panduan', dingyi: 'panduan', leibi: 'panduan', luoji: 'panduan', wenzi: 'ziliao', biaoge: 'ziliao', tubiao: 'ziliao', zonghe: 'ziliao', zengzhang: 'ziliao', zhengzhi: 'changshi', jingji: 'changshi', falv: 'changshi', keji: 'changshi', renwen: 'changshi', dili: 'changshi' };
-const DEFAULT_SUBCATEGORY = { yanyu: 'yueduan', shuliang: 'jisuan', panduan: 'luoji', ziliao: 'zonghe', changshi: 'zhengzhi' };
+const SUBCATEGORY_CATEGORY_MAP = { gaoshu: 'math', daishu: 'math', gaiilv: 'math', wanxing: 'english', yuedu: 'english', fanyi: 'english', xiezuo: 'english', makesi: 'politics', maogai: 'politics', shixi: 'politics', shiju: 'politics', xuanci: 'yanyu', yueduan: 'yanyu', yuju: 'yanyu', wenzhang: 'yanyu', jisuan: 'shuliang', tuili: 'shuliang', tuxing: 'panduan', dingyi: 'panduan', leibi: 'panduan', luoji: 'panduan', wenzi: 'ziliao', biaoge: 'ziliao', tubiao: 'ziliao', zonghe: 'ziliao', zengzhang: 'ziliao', zhengzhi: 'changshi', jingji: 'changshi', falv: 'changshi', keji: 'changshi', renwen: 'changshi', dili: 'changshi' };
+const DEFAULT_SUBCATEGORY = { math: 'gaoshu', english: 'yuedu', politics: 'makesi', major: 'major', yanyu: 'yueduan', shuliang: 'jisuan', panduan: 'luoji', ziliao: 'zonghe', changshi: 'zhengzhi' };
 const CATEGORY_RULES = [
+  { value: 'math', patterns: ['函数', '极限', '导数', '积分', '矩阵', '线性代数', '概率', '数列'] },
+  { value: 'english', patterns: ['阅读理解', '完形填空', '英译汉', '翻译下列', '作文', 'paragraph', 'passage'] },
+  { value: 'politics', patterns: ['马克思主义', '毛泽东思想', '中国特色社会主义', '思想道德与法治', '形势与政策'] },
   { value: 'ziliao', patterns: ['根据下列资料', '根据以下资料', '图表', '统计表', '同比', '环比', '增长率', '表中', '图中'] },
   { value: 'panduan', patterns: ['根据上述定义', '图形', '问号处', '最能支持', '最能削弱', '如果那么', '只有才'] },
   { value: 'shuliang', patterns: ['工程问题', '行程问题', '概率问题', '几何问题', '利润', '浓度', '甲乙', '速度', '工作效率', '打折'] },
   { value: 'yanyu', patterns: ['这段文字', '文段', '依次填入', '语句排序', '病句', '成语', '词语'] },
 ];
 const SUBCATEGORY_RULES = {
+  math: [{ value: 'gaoshu', patterns: ['极限', '导数', '积分', '微分', '函数'] }, { value: 'daishu', patterns: ['矩阵', '行列式', '向量', '线性方程组'] }, { value: 'gaiilv', patterns: ['概率', '随机变量', '分布', '数理统计'] }],
+  english: [{ value: 'wanxing', patterns: ['完形填空'] }, { value: 'yuedu', patterns: ['阅读理解', 'passage'] }, { value: 'fanyi', patterns: ['翻译', '英译汉'] }, { value: 'xiezuo', patterns: ['作文', '写作'] }],
+  politics: [{ value: 'makesi', patterns: ['马克思主义', '辩证法', '唯物'] }, { value: 'maogai', patterns: ['毛泽东思想', '新时代中国特色社会主义'] }, { value: 'shixi', patterns: ['思想道德与法治'] }, { value: 'shiju', patterns: ['形势与政策', '时政'] }],
   yanyu: [{ value: 'wenzhang', patterns: ['阅读以下文字', '阅读下文', '根据这篇文章', '文章中'] }, { value: 'yuju', patterns: ['语句排序', '语句填空', '病句', '歧义', '下列各句'] }, { value: 'xuanci', patterns: ['依次填入', '填入划横线', '填入横线', '成语', '词语'] }, { value: 'yueduan', patterns: ['这段文字', '文段', '主旨', '意在说明', '理解正确', '标题最合适'] }],
   shuliang: [{ value: 'tuili', patterns: ['数字推理', '数字序列', '数列'] }, { value: 'jisuan', patterns: ['工程', '行程', '利润', '概率', '几何', '工作效率', '成本', '售价', '浓度', '容斥'] }],
   panduan: [{ value: 'dingyi', patterns: ['根据上述定义', '属于上述定义', '不属于上述定义'] }, { value: 'leibi', patterns: ['之于', '相当于', '最贴切'] }, { value: 'tuxing', patterns: ['图形', '问号处', '纸盒', '展开图', '折叠', '立体拼合', '三视图', '六面体', '截面'] }, { value: 'luoji', patterns: ['最能支持', '最能削弱', '最能解释', '不能质疑', '不能推出', '如果那么', '只有才', '加强', '削弱', '论证'] }],
@@ -80,8 +101,18 @@ function normalizeQuestionTaxonomy(question = {}) {
   const rawSubCategory = trimText(question.subCategory || question.sub_category);
   const content = question.content || '';
   const aliasedSubCategory = normalizeSubCategory(rawSubCategory) || normalizeSubCategory(rawCategory);
-  const category = inferCategoryBySubCategory(aliasedSubCategory) || inferCategoryFromContent(content) || normalizeCategory(rawCategory) || 'changshi';
-  const subCategory = (aliasedSubCategory && SUBCATEGORY_CATEGORY_MAP[aliasedSubCategory] === category ? aliasedSubCategory : '') || inferSubCategoryFromContent(category, content) || DEFAULT_SUBCATEGORY[category] || '';
+  const explicitCategory = normalizeCategory(rawCategory);
+
+  // 用户显式选择的分类优先。旧逻辑让「内容关键词推断」盖过用户选择，
+  // 导致选了「专业课」的题被强行改成数学/高数，后续按分类练习时找不到。
+  const category = explicitCategory
+    || inferCategoryBySubCategory(aliasedSubCategory)
+    || inferCategoryFromContent(content)
+    || 'changshi';
+  const subCategory = (aliasedSubCategory && SUBCATEGORY_CATEGORY_MAP[aliasedSubCategory] === category ? aliasedSubCategory : '')
+    || inferSubCategoryFromContent(category, content)
+    || DEFAULT_SUBCATEGORY[category]
+    || '';
   return { category, subCategory };
 }
 function inferCategoryFromQuestion(question = {}) { return normalizeQuestionTaxonomy(question).category; }

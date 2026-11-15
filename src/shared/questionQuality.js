@@ -164,9 +164,16 @@ function hasUsableMaterial(question = {}) {
 }
 
 function isPracticeableQuestion(question = {}) {
+  const type = String(question.type || '').toLowerCase();
+  const content = trimText(question.content || question.content_html);
+  if (type === 'subjective') return Boolean(content);
+  if (type === 'fill') return Boolean(content);
   const options = parseOptions(question.options);
   if (!options.length) return false;
-  if (!isAnswerCompatible(question.answer, options, question.type)) return false;
+  // 没有标准答案的客观题仍然可以进入练习（ExamRoom 会按「不自动判分」处理），
+  // 否则导入时漏识答案的题会变成永远刷不到的死题。有答案时必须与选项匹配。
+  const hasAnswer = Boolean(trimText(question.answer));
+  if (hasAnswer && !isAnswerCompatible(question.answer, options, question.type)) return false;
   if (String(question.quality_flag || '').includes('exclude')) return false;
   if (question.category === 'ziliao' && !hasUsableMaterial(question)) return false;
   return true;
