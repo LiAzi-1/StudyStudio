@@ -6,7 +6,8 @@ import AIChatImportDialog from '../components/AIChatImportDialog.jsx';
 import PhoneUploadDialog from '../components/PhoneUploadDialog.jsx';
 import CitationSheet from '../components/CitationSources.jsx';
 import LuoCat from '../components/LuoCat.jsx';
-import { describeAction, applyAIAction } from '../utils/aiActions.js';
+import { describeAction, applyAIAction, buildActionPlan } from '../utils/aiActions.js';
+import { ActionPlanView, ActionDiffView } from './AIActionPlan.jsx';
 import {
   MAX_ASSISTANT_IMAGES,
   readFileAsBase64,
@@ -24,6 +25,9 @@ const SUGGESTIONS = [
   { label: '收进错题本', prompt: '把这轮讲过的题收进错题本，标注我的错因' },
   { label: '安排今天', prompt: '根据我现在的进度，帮我调整今天的学习任务' },
 ];
+
+// 续写指令只随请求发给模型，不落库、不展示，避免污染对话记录
+const CONTINUE_PROMPT = '请从上面中断的位置继续输出，不要重复已经写过的内容，不要重新开头，也不要解释自己在续写。';
 
 const parseMeta = (raw) => {
   if (!raw) return {};
@@ -96,14 +100,26 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   const [imageStats, setImageStats] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [phoneOpen, setPhoneOpen] = useState(false);
+  const [planChoices, setPlanChoices] = useState({});
+  // 会话搜索：null 表示未搜索，直接用全量列表
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [editing, setEditing] = useState(null);
+  // 每条用户消息选中的回答版本下标；缺省展示最新一版
+  const [versionPick, setVersionPick] = useState({});
+  const [showJump, setShowJump] = useState(false);
+  const [streamMode, setStreamMode] = useState('new');
 
   const activeIdRef = useRef('');
   const loadingRef = useRef(false);
   const requestIdRef = useRef('');
   const streamTextRef = useRef('');
-  const messagesRef = useRef([]);
   const listRef = useRef(null);
   const fileRef = useRef(null);
+  const planBuildingRef = useRef(new Set());
+  const pendingRef = useRef(null);
+  const stickRef = useRef(true);
+  const searchQueryRef = useRef('');
 
   useEffect(() => {
     try {
@@ -144,10 +160,44 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     }
   }, []);
 
+  // 搜索态下刷新列表要连搜索结果一起重算，否则重命名 / 置顶后列表还是旧的
+  const refreshList = useCallback(async () => {
+    const rows = await loadSessions();
+    const keyword = searchQueryRef.current.trim();
+    if (keyword) {
+      try {
+        const found = await window.openexam?.db?.searchAIChatSessions?.(keyword, 100);
+        setSearchResults(Array.isArray(found) ? found : []);
+      } catch { setSearchResults([]); }
+    }
+    return rows;
+  }, [loadSessions]);
+
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+    const keyword = searchQuery.trim();
+    if (!keyword) {
+      setSearchResults(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const found = await window.openexam?.db?.searchAIChatSessions?.(keyword, 100);
+        if (!cancelled) setSearchResults(Array.isArray(found) ? found : []);
+      } catch {
+        if (!cancelled) setSearchResults([]);
+      }
+    }, 220);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [searchQuery]);
+
   const selectSession = useCallback(async (sessionId, rows = []) => {
     const target = rows.find((item) => item.id === sessionId);
     setActiveId(sessionId || '');
     activeIdRef.current = sessionId || '';
+    setVersionPick({});
+    setEditing(null);
     setPinnedContext(parseMeta(target?.context_json)?.questionId ? parseMeta(target.context_json) : null);
     if (sessionId) {
       localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
@@ -159,6 +209,8 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     } else {
       setMessages([]);
     }
+    stickRef.current = true;
+    setShowJump(false);
   }, [loadMessages]);
 
   useEffect(() => {
@@ -184,44 +236,165 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     if (incomingSubjectId) setSubjectId(incomingSubjectId);
   }, [incomingSubjectId]);
 
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
   useEffect(() => { streamTextRef.current = streamText; }, [streamText]);
 
+  // 只有用户本来就贴着底部时才自动跟随，否则不打断向上翻阅
   useEffect(() => {
-    if (!listRef.current) return;
+    if (!listRef.current || !stickRef.current) return;
     listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, streamText]);
+
+  const handleListScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distance < 80;
+    stickRef.current = nearBottom;
+    setShowJump(!nearBottom);
+  }, []);
+
+  const jumpToBottom = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    stickRef.current = true;
+    setShowJump(false);
+  }, []);
+
+  /**
+   * 一问多答：回答按 meta.replyTo 归到对应的用户消息下。
+   * 老数据没有 replyTo 时按位置回退到上一条用户消息，保证历史会话照常显示。
+   */
+  const groups = useMemo(() => {
+    const list = [];
+    const byUserId = new Map();
+    let current = null;
+    for (const message of messages) {
+      if (message.role === 'user') {
+        const group = { user: message, replies: [] };
+        list.push(group);
+        byUserId.set(message.id, group);
+        current = group;
+        continue;
+      }
+      const target = message.meta?.replyTo ? byUserId.get(message.meta.replyTo) : null;
+      if (target) { target.replies.push(message); continue; }
+      if (current) { current.replies.push(message); continue; }
+      list.push({ user: null, replies: [message] });
+    }
+    return list;
+  }, [messages]);
+
+  const pickReply = useCallback((group) => {
+    if (!group?.replies?.length) return null;
+    const total = group.replies.length;
+    const chosen = group.user ? versionPick[group.user.id] : undefined;
+    const index = Number.isInteger(chosen) ? Math.min(Math.max(chosen, 0), total - 1) : total - 1;
+    return { message: group.replies[index], index, total };
+  }, [versionPick]);
+
+  /**
+   * 生成上下文：按轮次取当前展示的那版回答，跳过被中断的残稿。
+   * includeUser=false 时停在指定用户消息之前（编辑重发用，等价于从这条消息分叉）。
+   */
+  const buildHistory = useCallback((upToUserId, { includeUser = true } = {}) => {
+    const out = [];
+    for (const group of groups) {
+      if (group.user && upToUserId && group.user.id === upToUserId) {
+        if (includeUser) out.push({ role: 'user', content: group.user.content });
+        break;
+      }
+      if (group.user) out.push({ role: 'user', content: group.user.content });
+      const picked = pickReply(group);
+      if (picked?.message?.content && !picked.message.meta?.interrupted) {
+        out.push({ role: 'assistant', content: picked.message.content });
+      }
+    }
+    return out;
+  }, [groups, pickReply]);
 
   const patchMessage = useCallback((messageId, patch) => {
     setMessages((prev) => prev.map((item) => (item.id === messageId ? { ...item, meta: { ...item.meta, ...patch } } : item)));
   }, []);
 
+  const saveAssistantMessage = useCallback(async ({ sessionId, replyTo, content, meta }) => {
+    const payloadMeta = { ...meta };
+    if (replyTo) payloadMeta.replyTo = replyTo;
+    try {
+      const saved = await window.openexam.db.addAIChatMessage({ sessionId, role: 'assistant', content, meta: payloadMeta });
+      const row = normalizeRow(saved);
+      // 生成期间用户可能已经切到别的会话，别把消息追加到当前列表里
+      if (activeIdRef.current === sessionId) setMessages((prev) => [...prev, row]);
+      return row;
+    } catch (error) {
+      toast({ title: '保存回复失败', message: error?.message || String(error), tone: 'warning' });
+      return null;
+    }
+  }, [toast]);
+
   const handleEvent = useCallback(async (payload) => {
     if (!payload || payload.requestId !== requestIdRef.current) return;
     if (payload.type === 'delta') {
-      setStreamText((prev) => prev + String(payload.delta || ''));
+      const next = streamTextRef.current + String(payload.delta || '');
+      streamTextRef.current = next;
+      setStreamText(next);
       return;
     }
+
+    const pending = pendingRef.current;
     if (payload.type === 'cancelled') {
       setLoading(false);
+      loadingRef.current = false;
+      // 中断前已经吐出来的内容落库为「中断版」，用户可以据此继续生成
+      const partial = String(streamTextRef.current || '').trim();
       setStreamText('');
+      streamTextRef.current = '';
+      requestIdRef.current = '';
+      pendingRef.current = null;
+      setStreamMode('new');
+      if (partial && pending?.sessionId) {
+        await saveAssistantMessage({
+          sessionId: pending.sessionId,
+          replyTo: pending.replyTo,
+          content: (pending.prefix || '') + partial,
+          meta: { interrupted: true, model: '', role: '' },
+        });
+        if (pending.replyTo) {
+          setVersionPick((prev) => {
+            if (!(pending.replyTo in prev)) return prev;
+            const next = { ...prev };
+            delete next[pending.replyTo];
+            return next;
+          });
+        }
+        await refreshList();
+      }
       toast({ message: '已停止生成', tone: 'info' });
       return;
     }
     if (payload.type === 'error') {
       setLoading(false);
+      loadingRef.current = false;
       setStreamText('');
+      streamTextRef.current = '';
+      requestIdRef.current = '';
+      pendingRef.current = null;
+      setStreamMode('new');
       toast({ title: 'AI 请求失败', message: payload.error || '未知错误', tone: 'danger' });
       return;
     }
     if (payload.type !== 'done') return;
 
     setLoading(false);
-    const sessionId = activeIdRef.current;
+    loadingRef.current = false;
+    const sessionId = pending?.sessionId || activeIdRef.current;
     const text = String(payload.content || '').trim();
-    if (!sessionId || !text) { setStreamText(''); return; }
+    requestIdRef.current = '';
+    pendingRef.current = null;
+    setStreamMode('new');
+    if (!sessionId || !text) { setStreamText(''); streamTextRef.current = ''; return; }
     const meta = {
       citations: payload.citations || [],
       action: payload.action || null,
@@ -230,21 +403,61 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
       model: payload.model || '',
       role: payload.role || '',
     };
-    try {
-      const saved = await window.openexam.db.addAIChatMessage({ sessionId, role: 'assistant', content: text, meta });
-      setMessages((prev) => [...prev, normalizeRow(saved)]);
-    } catch (error) {
-      toast({ title: '保存回复失败', message: error?.message || String(error), tone: 'warning' });
+    await saveAssistantMessage({
+      sessionId,
+      replyTo: pending?.replyTo || '',
+      content: (pending?.prefix || '') + text,
+      meta,
+    });
+    // 新一轮回答落库后回到最新版本，避免用户停留在旧版上以为没生成
+    if (pending?.replyTo) {
+      setVersionPick((prev) => {
+        if (!(pending.replyTo in prev)) return prev;
+        const next = { ...prev };
+        delete next[pending.replyTo];
+        return next;
+      });
     }
     setStreamText('');
+    streamTextRef.current = '';
     if (payload.warning) toast({ message: payload.warning, tone: 'info' });
-    await loadSessions();
-  }, [loadSessions, toast]);
+    await refreshList();
+  }, [refreshList, saveAssistantMessage, toast]);
 
   useEffect(() => {
     const off = window.openexam?.aiChat?.onEvent?.(handleEvent);
     return () => off?.();
   }, [handleEvent]);
+
+  /** 统一发起一次生成；replyTo 指向这条回答所属的用户消息 */
+  const startGeneration = useCallback(async ({ history, replyTo, sessionId, sendImages = [], prefix = '', mode = 'new' }) => {
+    const requestId = `aichat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    requestIdRef.current = requestId;
+    pendingRef.current = { sessionId, replyTo: replyTo || '', prefix: prefix || '' };
+    streamTextRef.current = '';
+    setStreamText('');
+    setStreamMode(mode);
+    setLoading(true);
+    loadingRef.current = true;
+
+    const res = await window.openexam.aiChat.chatStreamStart({
+      requestId,
+      settings: getAISettings(),
+      messages: history,
+      images: sendImages.map(({ base64, mimeType }) => ({ base64, mimeType })),
+      subjectId: subjectId || null,
+      questionContext: pinnedContext || null,
+    });
+    if (!res?.success) {
+      setLoading(false);
+      loadingRef.current = false;
+      setStreamMode('new');
+      requestIdRef.current = '';
+      pendingRef.current = null;
+      toast({ title: '发送失败', message: res?.error || '未知错误', tone: 'danger' });
+    }
+    await refreshList();
+  }, [pinnedContext, refreshList, subjectId, toast]);
 
   const ensureSession = useCallback(async (firstText) => {
     if (activeIdRef.current) return activeIdRef.current;
@@ -296,7 +509,8 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   const send = useCallback(async (override) => {
     if (loadingRef.current) return;
     const text = String(override ?? input).trim();
-    if (!text && !images.length) return;
+    const attached = images;
+    if (!text && !attached.length) return;
     if (!isAssistantConfigured()) {
       toast({ title: '还没配置 AI 模型', message: '请到「设置 → AI 模型」给「老师」或「识图」角色配置模型。', tone: 'warning' });
       return;
@@ -305,9 +519,9 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     const sessionId = await ensureSession(text);
     const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     let storedImages = [];
-    if (images.length) {
+    if (attached.length) {
       try {
-        const saved = await window.openexam.aiChat.saveMessageImages({ sessionId, messageId, images });
+        const saved = await window.openexam.aiChat.saveMessageImages({ sessionId, messageId, images: attached });
         storedImages = saved?.images || [];
       } catch { /* 图片落盘失败不影响本轮提问 */ }
     }
@@ -332,37 +546,117 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
       localStorage.removeItem(QUESTION_CONTEXT_KEY);
     }
 
-    const history = [...messagesRef.current.map((item) => ({
-      role: item.role,
-      content: item.content,
-    })), { role: 'user', content: text }];
-
-    const requestId = `aichat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    requestIdRef.current = requestId;
-    setLoading(true);
-    setStreamText('');
+    const history = [...buildHistory(null), { role: 'user', content: text }];
     setInput('');
     setImages([]);
+    await startGeneration({ history, replyTo: messageId, sessionId, sendImages: attached });
+  }, [buildHistory, ensureSession, images, input, pinnedContext, startGeneration, toast]);
 
-    const res = await window.openexam.aiChat.chatStreamStart({
-      requestId,
-      settings: getAISettings(),
-      messages: history,
-      images: images.map(({ base64, mimeType }) => ({ base64, mimeType })),
-      subjectId: subjectId || null,
-      questionContext: pinnedContext || null,
-    });
-    if (!res?.success) {
-      setLoading(false);
-      toast({ title: '发送失败', message: res?.error || '未知错误', tone: 'danger' });
+  /** 重新生成：用这条用户消息之前的上下文再来一次，结果作为新版本追加 */
+  const regenerate = useCallback(async (userMessage) => {
+    if (loadingRef.current) {
+      toast({ message: '正在生成，先停止再重新生成', tone: 'info' });
+      return;
     }
-    await loadSessions();
-  }, [ensureSession, images, input, loadSessions, messages, pinnedContext, subjectId, toast]);
+    if (!isAssistantConfigured()) {
+      toast({ title: '还没配置 AI 模型', message: '请到「设置 → AI 模型」给「老师」或「识图」角色配置模型。', tone: 'warning' });
+      return;
+    }
+    const sessionId = activeIdRef.current;
+    if (!sessionId) return;
+    const history = buildHistory(userMessage.id);
+    if (!history.length) return;
+    await startGeneration({ history, replyTo: userMessage.id, sessionId });
+  }, [buildHistory, startGeneration, toast]);
+
+  const beginEdit = useCallback((message) => {
+    setEditing({ id: message.id, text: message.content });
+  }, []);
+
+  /** 编辑后重发：保留原消息，新消息以 editedFrom 指向旧版，回答作为新的一轮追加 */
+  const submitEdit = useCallback(async () => {
+    const nextText = String(editing?.text || '').trim();
+    if (!nextText || !editing) return;
+    if (loadingRef.current) {
+      toast({ message: '正在生成，先停止再编辑重发', tone: 'info' });
+      return;
+    }
+    if (!isAssistantConfigured()) {
+      toast({ title: '还没配置 AI 模型', message: '请到「设置 → AI 模型」给「老师」或「识图」角色配置模型。', tone: 'warning' });
+      return;
+    }
+    const sessionId = activeIdRef.current;
+    if (!sessionId) return;
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    try {
+      const saved = await window.openexam.db.addAIChatMessage({
+        id: messageId,
+        sessionId,
+        role: 'user',
+        content: nextText,
+        meta: { editedFrom: editing.id },
+      });
+      setMessages((prev) => [...prev, normalizeRow(saved)]);
+    } catch (error) {
+      toast({ title: '消息保存失败', message: error?.message || String(error), tone: 'danger' });
+      return;
+    }
+    const history = [...buildHistory(editing.id, { includeUser: false }), { role: 'user', content: nextText }];
+    setEditing(null);
+    await startGeneration({ history, replyTo: messageId, sessionId });
+  }, [buildHistory, editing, startGeneration, toast]);
+
+  /** 继续生成：把中断版当助手前缀，追加一条不可见的续写指令，结果并入新版 */
+  const continueReply = useCallback(async (userMessage, replyMessage) => {
+    if (loadingRef.current) return;
+    if (!isAssistantConfigured()) {
+      toast({ title: '还没配置 AI 模型', message: '请到「设置 → AI 模型」给「老师」或「识图」角色配置模型。', tone: 'warning' });
+      return;
+    }
+    const sessionId = activeIdRef.current;
+    if (!sessionId || !replyMessage?.content) return;
+    const history = [
+      ...buildHistory(userMessage?.id || null),
+      { role: 'assistant', content: replyMessage.content },
+      { role: 'user', content: CONTINUE_PROMPT },
+    ];
+    await startGeneration({
+      history,
+      replyTo: userMessage?.id || '',
+      sessionId,
+      prefix: replyMessage.content,
+      mode: 'continue',
+    });
+  }, [buildHistory, startGeneration, toast]);
+
+  const copyMessage = useCallback(async (message) => {
+    const raw = String(message?.content || '');
+    // 复制时去掉引用角标，粘贴到别处不会留下 [[C1]] 这类标记
+    const text = message?.role === 'assistant' ? stripCitations(raw) : raw;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast({ message: '已复制这条消息', tone: 'success' });
+    } catch {
+      toast({ message: '复制失败，请手动选中文本', tone: 'warning' });
+    }
+  }, [toast]);
 
   const stop = useCallback(async () => {
     if (!requestIdRef.current) return;
     try { await window.openexam?.aiChat?.chatStreamCancel?.(requestIdRef.current); } catch { /* 忽略 */ }
   }, []);
+
+  // Esc 停止生成；输入框里正在用中文输入法组词时不拦截
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape' || !loadingRef.current) return;
+      event.preventDefault();
+      stop();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [stop]);
 
   const newSession = useCallback(async () => {
     setActiveId('');
@@ -370,6 +664,9 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     setMessages([]);
     setPinnedContext(null);
     setStreamText('');
+    streamTextRef.current = '';
+    setVersionPick({});
+    setEditing(null);
     localStorage.removeItem(ACTIVE_SESSION_KEY);
   }, []);
 
@@ -382,8 +679,15 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     });
     if (!next) return;
     await window.openexam.db.renameAIChatSession(session.id, next);
-    await loadSessions();
-  }, [loadSessions, prompt]);
+    await refreshList();
+  }, [prompt, refreshList]);
+
+  const togglePin = useCallback(async (session) => {
+    const pinned = !session.pinned_at;
+    await window.openexam.db.setAIChatSessionPinned(session.id, pinned);
+    await refreshList();
+    toast({ message: pinned ? '已置顶' : '已取消置顶', tone: 'info' });
+  }, [refreshList, toast]);
 
   const deleteSession = useCallback(async (session) => {
     const ok = await confirm({
@@ -394,12 +698,12 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     });
     if (!ok) return;
     await window.openexam.db.deleteAIChatSession(session.id);
-    const rows = await loadSessions();
+    const rows = await refreshList();
     if (session.id === activeIdRef.current) {
       if (rows[0]) await selectSession(rows[0].id, rows);
       else await newSession();
     }
-  }, [confirm, loadSessions, newSession, selectSession]);
+  }, [confirm, newSession, refreshList, selectSession]);
 
   const cleanupImages = useCallback(async () => {
     const res = await window.openexam?.aiChat?.cleanupImages?.();
@@ -414,20 +718,81 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     }
   }, [activeId, toast]);
 
+  const actionCtx = useMemo(() => ({
+    subjectId: sessions.find((item) => item.id === activeId)?.subject_id || subjectId,
+    subjects,
+    toast,
+    onNavigate,
+    loadSubjects,
+    settings: getAISettings(),
+    isConfigured: assistantConfigured,
+  }), [sessions, activeId, subjectId, subjects, toast, onNavigate, loadSubjects, assistantConfigured]);
+
+  // 计划只读生成：不写库、不调用模型；用户确认后才真正执行
+  useEffect(() => {
+    for (const message of messages) {
+      const action = message.meta?.action;
+      if (!action) continue;
+      if (message.meta.actionStatus && message.meta.actionStatus !== 'pending') continue;
+      if (message.meta.actionPlan) continue;
+      if (planBuildingRef.current.has(message.id)) continue;
+      planBuildingRef.current.add(message.id);
+      buildActionPlan(action, actionCtx)
+        .then((plan) => patchMessage(message.id, { actionPlan: plan }))
+        .catch((error) => patchMessage(message.id, {
+          actionPlan: { type: action.type, label: describeAction(action).label, error: error?.message || String(error) },
+        }))
+        .finally(() => { planBuildingRef.current.delete(message.id); });
+    }
+  }, [messages, actionCtx, patchMessage]);
+
+  const choosePlan = useCallback(async (message, plan, value) => {
+    if (!plan || !value) return;
+    setPlanChoices((prev) => ({ ...prev, [message.id]: { field: plan.choiceField || 'noteId', value } }));
+    const nextAction = { ...message.meta.action };
+    if (plan.choiceField === 'section') nextAction.section = value;
+    else {
+      nextAction.noteId = value;
+      nextAction.titleQuery = '';
+    }
+    try {
+      const next = await buildActionPlan(nextAction, actionCtx);
+      patchMessage(message.id, { actionPlan: next });
+    } catch {
+      // 重新生成计划失败时保留原计划，用户仍可取消
+    }
+  }, [actionCtx, patchMessage]);
+
   const runAction = useCallback(async (message) => {
-    if (!message?.meta?.action) return;
+    const baseAction = message?.meta?.action;
+    if (!baseAction) return;
+    const plan = message.meta?.actionPlan || null;
+    const choice = planChoices[message.id];
+    const choiceValue = plan && choice?.field === plan.choiceField ? choice.value : '';
+    if (plan?.needsChoice && !choiceValue) {
+      toast({ message: '请先在计划里选择要修改的目标', tone: 'warning' });
+      return;
+    }
+    if (plan?.error && !plan?.needsChoice) {
+      toast({ message: plan.error, tone: 'warning' });
+      return;
+    }
+
+    const action = { ...baseAction };
+    if (choiceValue && plan?.choiceField === 'noteId') {
+      action.noteId = choiceValue;
+      action.titleQuery = '';
+    }
+    if (choiceValue && plan?.choiceField === 'section') {
+      action.section = choiceValue;
+    }
+
     patchMessage(message.id, { actionStatus: 'applying', actionResult: '' });
     try {
-      const summary = await applyAIAction(message.meta.action, {
-        subjectId: sessions.find((item) => item.id === activeId)?.subject_id || subjectId,
-        subjects,
-        toast,
-        onNavigate,
-        loadSubjects,
-        settings: getAISettings(),
-        isConfigured: isAssistantConfigured(),
-      });
-      const meta = { ...message.meta, actionStatus: 'done', actionResult: summary };
+      const result = await applyAIAction(action, { ...actionCtx, plan });
+      const summary = typeof result === 'string' ? result : (result?.summary || '');
+      const extraMeta = result && typeof result === 'object' ? (result.extraMeta || {}) : {};
+      const meta = { ...message.meta, actionStatus: 'done', actionResult: summary, ...extraMeta };
       await window.openexam.aiChat.updateMessageMeta({ messageId: message.id, meta });
       setMessages((prev) => prev.map((item) => (item.id === message.id ? { ...item, meta } : item)));
     } catch (error) {
@@ -436,10 +801,11 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
       setMessages((prev) => prev.map((item) => (item.id === message.id ? { ...item, meta } : item)));
       toast({ title: '动作执行失败', message: error?.message || String(error), tone: 'danger' });
     }
-  }, [activeId, loadSubjects, onNavigate, patchMessage, sessions, subjectId, subjects, toast]);
+  }, [actionCtx, patchMessage, planChoices, toast]);
 
   const ignoreAction = useCallback(async (message) => {
-    const meta = { ...message.meta, actionStatus: 'ignored' };
+    // 取消：只更新本地状态，不发起任何写入请求
+    const meta = { ...message.meta, actionStatus: 'ignored', actionResult: '' };
     await window.openexam.aiChat.updateMessageMeta({ messageId: message.id, meta });
     setMessages((prev) => prev.map((item) => (item.id === message.id ? { ...item, meta } : item)));
   }, []);
@@ -516,6 +882,8 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   };
 
   const activeSession = sessions.find((item) => item.id === activeId);
+  const searching = Boolean(searchQuery.trim());
+  const visibleSessions = searchResults ?? sessions;
 
   return (
     <section style={{ display: 'flex', gap: 0, height: '100%', minHeight: 0, borderTop: '1px solid var(--line)' }}>
@@ -523,6 +891,12 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
       <aside style={{ width: 224, flexShrink: 0, borderRight: '1px solid var(--line)', background: 'var(--surface)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <button type="button" onClick={newSession} style={{ ...BTN(true), width: '100%' }}>＋ 新对话</button>
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="搜索标题或消息内容"
+            style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--surface-soft)', color: 'var(--text)', fontSize: 12, boxSizing: 'border-box' }}
+          />
           <button type="button" onClick={() => setImportOpen(true)} style={{ ...BTN(false), width: '100%' }}>导入外部对话</button>
           <select
             value={subjectId}
@@ -535,10 +909,10 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
           </select>
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '0 8px 8px' }}>
-          {sessions.map((session) => (
+          {visibleSessions.map((session) => (
             <div
               key={session.id}
-              onClick={() => selectSession(session.id, sessions)}
+              onClick={() => selectSession(session.id, visibleSessions)}
               style={{
                 padding: '8px 10px', borderRadius: 8, cursor: 'pointer', marginBottom: 4,
                 background: session.id === activeId ? 'var(--accent-soft-bg)' : 'transparent',
@@ -548,16 +922,32 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
                 <span style={{ flex: 1, fontSize: 12, fontWeight: session.id === activeId ? 700 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {session.title || '新会话'}
                 </span>
+                <button
+                  type="button"
+                  title={session.pinned_at ? '取消置顶' : '置顶'}
+                  onClick={(event) => { event.stopPropagation(); togglePin(session); }}
+                  style={{ border: 'none', background: 'transparent', color: session.pinned_at ? 'var(--accent)' : 'var(--muted)', cursor: 'pointer', fontSize: 11, padding: 0 }}
+                >{session.pinned_at ? '★' : '☆'}</button>
                 <button type="button" title="重命名" onClick={(event) => { event.stopPropagation(); renameSession(session); }} style={{ border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: 11 }}>✎</button>
                 <button type="button" title="删除" onClick={(event) => { event.stopPropagation(); deleteSession(session); }} style={{ border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: 12 }}>×</button>
               </div>
               <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
                 {session.source === 'imported' ? '导入 · ' : ''}
                 {session.message_count ? `${session.message_count} 条消息` : '还没有消息'}
+                {session.pinned_at ? ' · 已置顶' : ''}
               </div>
+              {searching && session.match_snippet ? (
+                <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 3, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                  {session.match_snippet}
+                </div>
+              ) : null}
             </div>
           ))}
-          {!sessions.length ? <div style={{ fontSize: 11, color: 'var(--muted)', padding: 10 }}>还没有会话，直接提问就会创建。</div> : null}
+          {!visibleSessions.length ? (
+            <div style={{ fontSize: 11, color: 'var(--muted)', padding: 10 }}>
+              {searching ? '没有匹配的会话，换个关键词试试。' : '还没有会话，直接提问就会创建。'}
+            </div>
+          ) : null}
         </div>
         <div style={{ padding: 10, borderTop: '1px solid var(--line)', fontSize: 10, color: 'var(--muted)', display: 'flex', flexDirection: 'column', gap: 6 }}>
           <span>图片按会话保存{imageStats?.count ? `：当前 ${imageStats.count} 张` : ''}</span>
@@ -600,7 +990,12 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
           ) : null}
         </header>
 
-        <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+        <div
+          ref={listRef}
+          onScroll={handleListScroll}
+          style={{ flex: 1, overflow: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}
+        >
           {!messages.length && !streamText ? (
             <div style={{ margin: 'auto 0', maxWidth: 520 }}>
               <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.9 }}>
@@ -616,71 +1011,184 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
             </div>
           ) : null}
 
-          {messages.map((message) => {
-            const isUser = message.role === 'user';
-            const action = message.meta?.action;
+          {groups.map((group, groupIndex) => {
+            const user = group.user;
+            const picked = pickReply(group);
+            const reply = picked?.message || null;
+            const isEditing = Boolean(user && editing?.id === user.id);
             return (
-              <div key={message.id} style={{ display: 'flex', flexDirection: 'column', alignItems: isUser ? 'flex-end' : 'flex-start', gap: 6 }}>
-                <div style={{
-                  maxWidth: 'min(720px, 88%)',
-                  padding: '10px 13px',
-                  borderRadius: 12,
-                  background: isUser ? 'var(--ai-user-bg)' : 'var(--surface-elevated)',
-                  border: isUser ? '1px solid var(--ai-user-bg)' : '1px solid var(--line)',
-                  color: isUser ? '#fff' : 'var(--text)',
-                  fontSize: 12.5,
-                  lineHeight: 1.75,
-                  wordBreak: 'break-word',
-                  overflowWrap: 'anywhere',
-                }}>
-                  {(message.meta?.images || []).length ? (
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: message.content ? 8 : 0 }}>
-                      {message.meta.images.map((image) => (
-                        <MessageImage key={image.path} path={image.path} />
-                      ))}
-                    </div>
-                  ) : null}
-                  {isUser
-                    ? <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
-                    : <AIMessageContent content={message.content} citations={message.meta?.citations || []} onOpenCitation={setCitation} />}
-                </div>
-
-                {!isUser && message.content ? (
-                  <div style={{ display: 'flex', gap: 8, paddingLeft: 2 }}>
-                    <button type="button" onClick={() => openBankModal(message)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>收进题库</button>
-                    <button type="button" onClick={() => openNoteModal(message)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>转成笔记</button>
+              <React.Fragment key={user?.id || reply?.id || `group-${groupIndex}`}>
+                {user ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+                    {isEditing ? (
+                      <div style={{ width: 'min(720px, 88%)', padding: 10, ...CARD, background: 'var(--surface-elevated)' }}>
+                        <textarea
+                          value={editing.text}
+                          onChange={(event) => setEditing((prev) => (prev ? { ...prev, text: event.target.value } : prev))}
+                          rows={3}
+                          style={{
+                            width: '100%', resize: 'vertical', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--line)',
+                            background: 'var(--surface-soft)', color: 'var(--text)', fontSize: 12.5, lineHeight: 1.6, fontFamily: 'inherit', boxSizing: 'border-box',
+                          }}
+                        />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+                          <button type="button" onClick={() => setEditing(null)} style={BTN(false)}>取消</button>
+                          <button type="button" onClick={submitEdit} disabled={!String(editing.text || '').trim()} style={{ ...BTN(true), opacity: String(editing.text || '').trim() ? 1 : 0.5 }}>保存并重发</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{
+                        maxWidth: 'min(720px, 88%)',
+                        padding: '10px 13px',
+                        borderRadius: 12,
+                        background: 'var(--ai-user-bg)',
+                        border: '1px solid var(--ai-user-bg)',
+                        color: '#fff',
+                        fontSize: 12.5,
+                        lineHeight: 1.75,
+                        wordBreak: 'break-word',
+                        overflowWrap: 'anywhere',
+                      }}>
+                        {(user.meta?.images || []).length ? (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: user.content ? 8 : 0 }}>
+                            {user.meta.images.map((image) => (
+                              <MessageImage key={image.path} path={image.path} />
+                            ))}
+                          </div>
+                        ) : null}
+                        <div style={{ whiteSpace: 'pre-wrap' }}>{user.content}</div>
+                      </div>
+                    )}
+                    {!isEditing && user.content ? (
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button type="button" onClick={() => copyMessage(user)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>复制</button>
+                        <button type="button" onClick={() => beginEdit(user)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>编辑</button>
+                        {!group.replies.length ? (
+                          <button type="button" onClick={() => regenerate(user)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>重新生成</button>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 
-                {action ? (
-                  <div style={{ maxWidth: 'min(680px, 88%)', padding: 12, ...CARD, background: 'var(--surface-elevated)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 12, fontWeight: 700 }}>{describeAction(action).label}</span>
-                      <span style={{ fontSize: 11, color: 'var(--muted)' }}>{describeAction(action).detail}</span>
-                      {message.meta.actionStatus === 'done' ? <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 600, color: 'var(--ai-success)' }}>已执行</span> : null}
-                      {message.meta.actionStatus === 'ignored' ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>已忽略</span> : null}
+                {reply ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
+                    {reply.content || reply.meta?.interrupted ? (
+                      <div style={{
+                        maxWidth: 'min(720px, 88%)',
+                        padding: '10px 13px',
+                        borderRadius: 12,
+                        background: 'var(--surface-elevated)',
+                        border: '1px solid var(--line)',
+                        color: 'var(--text)',
+                        fontSize: 12.5,
+                        lineHeight: 1.75,
+                        wordBreak: 'break-word',
+                        overflowWrap: 'anywhere',
+                      }}>
+                        <AIMessageContent content={reply.content} citations={reply.meta?.citations || []} onOpenCitation={setCitation} />
+                        {reply.meta?.interrupted ? (
+                          <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--warning)' }}>这条回答在生成过程中被中断，可以继续生成。</div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', paddingLeft: 2 }}>
+                      {reply.content ? (
+                        <button type="button" onClick={() => copyMessage(reply)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>复制</button>
+                      ) : null}
+                      {user ? (
+                        <button type="button" onClick={() => regenerate(user)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>重新生成</button>
+                      ) : null}
+                      {reply.meta?.interrupted && user ? (
+                        <button type="button" onClick={() => continueReply(user, reply)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>继续生成</button>
+                      ) : null}
+                      {reply.content ? (
+                        <>
+                          <button type="button" onClick={() => openBankModal(reply)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>收进题库</button>
+                          <button type="button" onClick={() => openNoteModal(reply)} style={{ ...BTN(false), fontSize: 11, padding: '4px 9px' }}>转成笔记</button>
+                        </>
+                      ) : null}
+                      {picked.total > 1 && user ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)' }}>
+                          <button
+                            type="button"
+                            title="上一版"
+                            disabled={picked.index <= 0}
+                            onClick={() => setVersionPick((prev) => ({ ...prev, [user.id]: picked.index - 1 }))}
+                            style={{ ...BTN(false), padding: '2px 7px', fontSize: 11, opacity: picked.index <= 0 ? 0.45 : 1, cursor: picked.index <= 0 ? 'not-allowed' : 'pointer' }}
+                          >‹</button>
+                          <span>第 {picked.index + 1}/{picked.total} 版{picked.index === picked.total - 1 ? '（最新）' : ''}</span>
+                          <button
+                            type="button"
+                            title="下一版"
+                            disabled={picked.index >= picked.total - 1}
+                            onClick={() => setVersionPick((prev) => ({ ...prev, [user.id]: picked.index + 1 }))}
+                            style={{ ...BTN(false), padding: '2px 7px', fontSize: 11, opacity: picked.index >= picked.total - 1 ? 0.45 : 1, cursor: picked.index >= picked.total - 1 ? 'not-allowed' : 'pointer' }}
+                          >›</button>
+                        </div>
+                      ) : null}
                     </div>
-                    {message.meta.actionResult ? (
-                      <div style={{ marginTop: 8, fontSize: 11.5, color: message.meta.actionStatus === 'error' ? 'var(--danger)' : 'var(--muted)', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
-                        {message.meta.actionResult}
-                      </div>
-                    ) : null}
-                    {!message.meta.actionStatus || message.meta.actionStatus === 'pending' ? (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                        <button type="button" onClick={() => runAction(message)} style={BTN(true)}>执行</button>
-                        <button type="button" onClick={() => ignoreAction(message)} style={BTN(false)}>忽略</button>
-                      </div>
-                    ) : null}
-                    {message.meta.actionStatus === 'applying' ? <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>执行中…</div> : null}
+
+                    {reply.meta?.action ? (() => {
+                      const action = reply.meta.action;
+                      const plan = reply.meta.actionPlan || null;
+                      const planChoice = planChoices[reply.id];
+                      const choiceValue = plan && planChoice?.field === plan.choiceField ? planChoice.value : '';
+                      const pending = !reply.meta.actionStatus || reply.meta.actionStatus === 'pending';
+                      const planBlocked = Boolean(plan) && (
+                        (Boolean(plan.error) && !plan.needsChoice)
+                        || (plan.needsChoice && !choiceValue)
+                      );
+                      return (
+                        <div style={{ maxWidth: 'min(680px, 88%)', padding: 12, ...CARD, background: 'var(--surface-elevated)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>{describeAction(action).label}</span>
+                            <span style={{ fontSize: 11, color: 'var(--muted)' }}>{describeAction(action).detail}</span>
+                            {reply.meta.actionStatus === 'done' ? <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 600, color: 'var(--ai-success)' }}>已执行</span> : null}
+                            {reply.meta.actionStatus === 'ignored' ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>已取消</span> : null}
+                          </div>
+                          {pending ? (
+                            <ActionPlanView
+                              plan={plan}
+                              choice={planChoice}
+                              onChoose={(value) => choosePlan(reply, plan, value)}
+                            />
+                          ) : null}
+                          {reply.meta.actionResult ? (
+                            <div style={{ marginTop: 8, fontSize: 11.5, color: reply.meta.actionStatus === 'error' ? 'var(--danger)' : 'var(--muted)', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+                              {reply.meta.actionResult}
+                            </div>
+                          ) : null}
+                          {reply.meta.actionDiff ? <ActionDiffView diff={reply.meta.actionDiff} /> : null}
+                          {pending ? (
+                            <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+                              <button
+                                type="button"
+                                disabled={!plan || planBlocked}
+                                onClick={() => runAction(reply)}
+                                style={{ ...BTN(true), opacity: !plan || planBlocked ? 0.5 : 1, cursor: !plan || planBlocked ? 'not-allowed' : 'pointer' }}
+                              >
+                                确认执行
+                              </button>
+                              <button type="button" onClick={() => ignoreAction(reply)} style={BTN(false)}>取消</button>
+                              {!plan ? <span style={{ fontSize: 11, color: 'var(--muted)' }}>正在生成计划…</span> : null}
+                            </div>
+                          ) : null}
+                          {reply.meta.actionStatus === 'applying' ? <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>执行中…</div> : null}
+                        </div>
+                      );
+                    })() : null}
                   </div>
                 ) : null}
-              </div>
+              </React.Fragment>
             );
           })}
 
           {streamText ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
               <div style={{ maxWidth: 'min(720px, 88%)', padding: '10px 13px', borderRadius: 12, background: 'var(--surface-elevated)', border: '1px solid var(--line)', fontSize: 12.5, lineHeight: 1.75 }}>
+                {streamMode === 'continue' ? <div style={{ fontSize: 10.5, color: 'var(--muted)', marginBottom: 6 }}>接着上一版继续写…</div> : null}
                 <AIMessageContent content={streamText} citations={[]} />
               </div>
             </div>
@@ -690,6 +1198,21 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
               <LuoCat size={18} className="luo-cat-bob" />
               正在思考…
             </div>
+          ) : null}
+        </div>
+          {showJump ? (
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              style={{
+                position: 'absolute', bottom: 14, left: '50%', transform: 'translateX(-50%)',
+                padding: '6px 12px', borderRadius: 16, border: '1px solid var(--line)',
+                background: 'var(--surface-elevated)', color: 'var(--text)', fontSize: 11, cursor: 'pointer',
+                boxShadow: '0 4px 14px rgba(0,0,0,0.18)', zIndex: 5,
+              }}
+            >
+              回到底部 ↓
+            </button>
           ) : null}
         </div>
 
@@ -742,12 +1265,14 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
                 }
               }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
+                // 中文输入法组词时 Enter 是在确认候选词，不能当成发送
+                const composing = event.nativeEvent?.isComposing || event.isComposing || event.keyCode === 229;
+                if (event.key === 'Enter' && !event.shiftKey && !composing) {
                   event.preventDefault();
                   send();
                 }
               }}
-              placeholder="问问题、贴题目，或让我帮你录题 / 写笔记 / 调计划（Enter 发送，Shift+Enter 换行）"
+              placeholder="问问题、贴题目，或让我帮你录题 / 写笔记 / 调计划（Enter 发送，Shift+Enter 换行，Esc 停止生成）"
               rows={2}
               style={{
                 flex: 1, resize: 'none', padding: '9px 12px', borderRadius: 10, border: '1px solid var(--line)',

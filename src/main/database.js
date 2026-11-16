@@ -373,6 +373,8 @@ function ensureAiChatSchema() {
     const names = new Set(sessionColumns.map((column) => column.name));
     if (!names.has('context_json')) db.prepare('ALTER TABLE ai_chat_sessions ADD COLUMN context_json TEXT').run();
     if (!names.has('source')) db.prepare("ALTER TABLE ai_chat_sessions ADD COLUMN source TEXT DEFAULT 'chat'").run();
+    // 置顶时间：为空表示未置顶；置顶会话在列表里排在最前
+    if (!names.has('pinned_at')) db.prepare('ALTER TABLE ai_chat_sessions ADD COLUMN pinned_at TEXT').run();
   }
 
   const messageColumns = db.pragma('table_info(ai_chat_messages)');
@@ -3417,15 +3419,62 @@ function getAIChatSessions(limit = 30, subjectId = null) {
     return db.prepare(`
       SELECT * FROM ai_chat_sessions
       WHERE subject_id = ?
-      ORDER BY COALESCE(last_message_at, created_at) DESC, updated_at DESC
+      ORDER BY (pinned_at IS NULL) ASC, pinned_at DESC, COALESCE(last_message_at, created_at) DESC, updated_at DESC
       LIMIT ?
     `).all(String(subjectId), count);
   }
   return db.prepare(`
     SELECT * FROM ai_chat_sessions
-    ORDER BY COALESCE(last_message_at, created_at) DESC, updated_at DESC
+    ORDER BY (pinned_at IS NULL) ASC, pinned_at DESC, COALESCE(last_message_at, created_at) DESC, updated_at DESC
     LIMIT ?
   `).all(count);
+}
+
+/** 把用户输入里的 LIKE 通配符转义掉，避免搜「100%」时把整库都匹配出来 */
+function escapeLike(value) {
+  return String(value || '').replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * 会话搜索：匹配标题与消息正文。
+ * 返回会话行，并附带第一条命中消息的摘要，方便在列表里看出为什么命中。
+ */
+function searchAIChatSessions(query, limit = 100) {
+  const keyword = String(query || '').trim();
+  const count = Math.max(1, Math.min(200, Number(limit) || 100));
+  if (!keyword) return getAIChatSessions(count);
+  const pattern = `%${escapeLike(keyword)}%`;
+
+  return db.prepare(`
+    SELECT
+      s.*,
+      (
+        SELECT SUBSTR(m.content, 1, 80)
+        FROM ai_chat_messages m
+        WHERE m.session_id = s.id AND m.content LIKE ? ESCAPE '\\'
+        ORDER BY m.created_at DESC, m.rowid DESC
+        LIMIT 1
+      ) AS match_snippet
+    FROM ai_chat_sessions s
+    WHERE s.title LIKE ? ESCAPE '\\'
+      OR EXISTS (
+        SELECT 1 FROM ai_chat_messages m
+        WHERE m.session_id = s.id AND m.content LIKE ? ESCAPE '\\'
+      )
+    ORDER BY (s.pinned_at IS NULL) ASC, s.pinned_at DESC, COALESCE(s.last_message_at, s.created_at) DESC, s.updated_at DESC
+    LIMIT ?
+  `).all(pattern, pattern, pattern, count);
+}
+
+function setAIChatSessionPinned(sessionId, pinned) {
+  const id = String(sessionId || '').trim();
+  if (!id) return null;
+  if (pinned) {
+    db.prepare('UPDATE ai_chat_sessions SET pinned_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+  } else {
+    db.prepare('UPDATE ai_chat_sessions SET pinned_at = NULL WHERE id = ?').run(id);
+  }
+  return db.prepare('SELECT * FROM ai_chat_sessions WHERE id = ?').get(id);
 }
 
 function getAIChatMessages(sessionId, limit = 300) {
@@ -4038,6 +4087,8 @@ module.exports = {
   updateAIChatSessionContext,
   renameAIChatSession,
   deleteAIChatSession,
+  searchAIChatSessions,
+  setAIChatSessionPinned,
   exportAllData,
   importAllData,
   resetUserData,

@@ -18,7 +18,7 @@ const { MATH_STYLE_PROMPT, normalizeMath } = require('../shared/mathStyle.js');
 // 模型忘了写 </action> 也要能救回来：闭合标签缺失时按「到文末」处理
 const ACTION_BLOCK_PATTERN = /<action>([\s\S]*?)(?:<\/action>|$)/i;
 
-const ACTION_TYPES = ['import_questions', 'add_wrong_questions', 'adjust_plan', 'write_notes', 'update_subject_profile', 'add_subject', 'generate_inventory', 'import_textbook_questions', 'classify_questions'];
+const ACTION_TYPES = ['import_questions', 'add_wrong_questions', 'adjust_plan', 'write_notes', 'edit_note', 'update_subject_profile', 'add_subject', 'generate_inventory', 'import_textbook_questions', 'classify_questions'];
 
 const TODO_KINDS = ['vocab', 'essay', 'drill', 'note', 'custom'];
 
@@ -125,7 +125,26 @@ const ASSISTANT_SYSTEM_PROMPT = `你是学习平台里的「AI 助教」。你�
 - 单篇 content 控制在 4000 字以内；内容更长就拆成多篇，不要写超长单篇（会被输出上限截断）
 - 整本科目的知识清单不要用这个动作手写，改用下面的 generate_inventory
 
-### 5. 生成 / 修改知识清单
+### 5. 修改已有笔记
+{
+  "type": "edit_note",
+  "noteId": "候选清单里的笔记 id，能确定时优先填",
+  "titleQuery": "不确定 id 时填笔记标题或关键词",
+  "subjectId": "当前科目 id，可省略",
+  "operation": "replace_section | append_after_section | replace_text | append_to_note",
+  "section": "要改的小节标题（前两种操作必填）",
+  "find": "replace_text 时要被替换的原文片段，必须与原文完全一致且只出现一次",
+  "content": "新内容（Markdown）"
+}
+- 只有用户明确要修改已有笔记时才用这个动作；新建笔记仍用 write_notes
+- noteId 只能来自下文「用户的笔记」清单；不确定是哪一篇时，先在正文里问用户选哪一篇，不要猜
+- replace_section：只写这一节的正文，不要带小节标题；这一节以外的段落由系统原样保留
+- append_after_section：把 content 插在这一节末尾、下一节标题之前
+- replace_text：用于「把这段重写」；find 必须从笔记原文里原样复制，找不到或多处命中时系统会让用户确认
+- 不要在 content 里输出整篇笔记；用户要整篇重写时先用正文确认，不要自己决定
+- 找不到小节或原文片段时，先问用户，不要改用整篇重写
+
+### 6. 生成 / 修改知识清单
 {
   "type": "generate_inventory",
   "subjectId": "当前科目 id",
@@ -144,7 +163,7 @@ const ASSISTANT_SYSTEM_PROMPT = `你是学习平台里的「AI 助教」。你�
 - 用户说“前面几章已经学过 / 从第 N 章开始 / 只看某某资料 / 按这个模块列表”时，把对应字段填上；不填则整科主教材
 - 用了这个动作，正文里只要说明正在生成即可，不要把清单全文再抄一遍；最终条目数、批次数以系统返回为准，不要自己编造
 
-### 6. 从资料导入例题 / 习题
+### 7. 从资料导入例题 / 习题
 {
   "type": "import_textbook_questions",
   "subjectId": "当前科目 id",
@@ -160,7 +179,7 @@ const ASSISTANT_SYSTEM_PROMPT = `你是学习平台里的「AI 助教」。你�
 - 同一章分批补录时带上 appendToPaperId，避免多出一份重复试卷
 - 结果里若提示缺页（未转出文字的页码），要在正文里如实告诉用户，不要根据缺失页面编题
 
-### 7. 按知识图谱分类题目
+### 8. 按知识图谱分类题目
 {
   "type": "classify_questions",
   "subjectId": "当前科目 id",
@@ -319,6 +338,202 @@ function formatContext(context = {}) {
 
 function buildSystemPrompt(context, subjectBlock = '') {
   return `${ASSISTANT_SYSTEM_PROMPT}\n\n## 当前学习数据（只读，用于判断，不确定就基于它给建议）\n${formatContext(context)}${subjectBlock}`;
+}
+
+/* ------------------------------------------------------------ 笔记候选上下文 */
+
+const NOTE_INTENT_RE = /(笔记|知识清单|学习计划|复盘|改写|重写|修改|追加|补充|更新|删掉|删除)/;
+const NOTE_BLOCK_LIMIT = 4200;
+
+function messageText(message) {
+  const raw = message?.content ?? message?.text;
+  if (typeof raw === 'string') return raw;
+  if (!Array.isArray(raw)) return '';
+  return raw.map((part) => (typeof part === 'string' ? part : part?.text || '')).join('\n');
+}
+
+function lastUserText(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]?.role === 'user' || list[index]?.type === 'user') {
+      return messageText(list[index]);
+    }
+  }
+  return '';
+}
+
+function bigramsOf(text) {
+  const source = String(text || '').replace(/\s+/g, '').toLowerCase();
+  const set = new Set();
+  for (let index = 0; index < source.length - 1; index += 1) {
+    set.add(source.slice(index, index + 2));
+  }
+  return set;
+}
+
+function quotedKeywords(text) {
+  const list = [];
+  const source = String(text || '');
+  for (const match of source.matchAll(/[「《“"'【]([^」》”"'】]{2,40})[」》”"'】]/g)) {
+    const value = match[1].trim();
+    if (value) list.push(value);
+  }
+  const anchor = source.match(/([\u4e00-\u9fa5A-Za-z0-9·—\-]{2,24})(?:的)?(?:笔记|知识清单)/);
+  if (anchor) list.push(anchor[1]);
+  return [...new Set(list)];
+}
+
+function scoreNote(note, userText, keywords, subjectId) {
+  const title = String(note.title || '').toLowerCase();
+  const source = String(userText || '').toLowerCase();
+  let score = 0;
+  if (subjectId && note.subjectId === subjectId) score += 3;
+  for (const keyword of keywords) {
+    const value = String(keyword || '').toLowerCase();
+    if (!value) continue;
+    if (title === value) score += 20;
+    else if (title.includes(value)) score += 10;
+    else if (source.includes(value)) score += 5;
+  }
+  const titleGrams = bigramsOf(title);
+  for (const gram of titleGrams) {
+    if (source.includes(gram)) score += 1;
+  }
+  return score;
+}
+
+function noteSections(content) {
+  const lines = String(content || '').split('\n');
+  return lines
+    .map((line, index) => {
+      const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+      return match ? { title: match[2].trim(), level: match[1].length, line: index } : null;
+    })
+    .filter(Boolean);
+}
+
+function relevantSectionText(content, keywords) {
+  const text = String(content || '');
+  if (!text.trim()) return '';
+  const sections = noteSections(text);
+  const lines = text.split('\n');
+  for (const keyword of keywords) {
+    const value = String(keyword || '').toLowerCase();
+    if (!value) continue;
+    const hit = sections.findIndex((section) => {
+      const title = section.title.toLowerCase();
+      return title.includes(value) || value.includes(title);
+    });
+    if (hit < 0) continue;
+    const start = sections[hit].line;
+    const end = sections.slice(hit + 1).find((section) => section.level <= sections[hit].level)?.line ?? lines.length;
+    return lines.slice(start, end).join('\n').slice(0, 1800);
+  }
+  return text.slice(0, 1200);
+}
+
+/**
+ * 把「用户可能想改哪篇笔记」压缩成上下文：
+ * - 先给最近更新的笔记清单（id / 标题 / 科目 / 更新时间 / 字数）
+ * - 再按用户这轮的原话打分，给匹配候选
+ * - 只对最可能的一篇附小节标题和相关原文，避免把整库笔记塞进提示词
+ */
+function buildNotesContext(database, { subjectId, messages } = {}) {
+  const userText = lastUserText(messages);
+  if (!userText || !NOTE_INTENT_RE.test(userText)) return '';
+
+  let briefs = [];
+  try {
+    if (typeof database.listNoteBriefs === 'function') {
+      briefs = database.listNoteBriefs({ subjectId: subjectId || undefined, limit: 80 });
+      if (subjectId) {
+        const all = database.listNoteBriefs({ limit: 80 });
+        const seen = new Set(briefs.map((item) => item.id));
+        briefs = [...briefs, ...all.filter((item) => !seen.has(item.id))];
+      }
+    } else {
+      const result = database.getNotes({ subjectId: subjectId || undefined, limit: 80 });
+      briefs = (result?.items || []).map((note) => ({
+        id: note.id,
+        title: note.title,
+        subjectId: note.subjectId,
+        updatedAt: note.updatedAt,
+        chars: [...String(note.content || '')].length,
+        preview: String(note.content || '').slice(0, 80),
+        content: note.content,
+      }));
+    }
+  } catch (error) {
+    console.warn('[Assistant] 读取笔记候选失败:', error?.message || error);
+    return '';
+  }
+  if (!briefs.length) return '';
+
+  const keywords = quotedKeywords(userText);
+  const scored = briefs
+    .map((note) => ({ note, score: scoreNote(note, userText, keywords, subjectId) }))
+    .sort((a, b) => b.score - a.score || String(b.note.updatedAt || '').localeCompare(String(a.note.updatedAt || '')));
+  const matches = scored.filter((item) => item.score > 0).slice(0, 6);
+  const targets = (matches.length ? matches : scored.slice(0, 4)).map((item) => item.note);
+
+  const lines = [
+    '## 用户的笔记（只读；用户要改已有笔记时使用 edit_note）',
+    '修改规则：',
+    '- noteId 只能从下面清单里选；标题或关键词命中多篇时，先在正文里问用户选哪一篇，不要猜。',
+    '- 只改用户点名的小节或原文片段，未涉及的段落由系统原样保留；不要在动作里输出整篇笔记。',
+    '- 找不到小节或原文片段时，先问用户，不要整篇重写。',
+  ];
+  if (matches.length) {
+    lines.push('', '匹配到的候选（这轮更可能在说这些）：');
+    for (const item of matches) {
+      const note = item.note;
+      lines.push(`- [${note.id}] 《${note.title}》｜科目：${noteSubjectName(note)}｜更新：${formatNoteTime(note.updatedAt)}｜${note.chars || 0} 字`);
+    }
+  }
+  lines.push('', '最近更新的笔记：');
+  for (const note of briefs.slice(0, 8)) {
+    lines.push(`- [${note.id}] 《${note.title}》｜科目：${noteSubjectName(note)}｜更新：${formatNoteTime(note.updatedAt)}｜${note.chars || 0} 字`);
+  }
+
+  const primary = targets[0];
+  if (primary) {
+    let content = primary.content;
+    if (content === undefined) {
+      try {
+        content = database.getNote(primary.id)?.content || '';
+      } catch {
+        content = '';
+      }
+    }
+    const sections = noteSections(content);
+    if (sections.length) {
+      lines.push('', `最可能的目标笔记《${primary.title}》的小节：`);
+      for (const section of sections.slice(0, 40)) {
+        lines.push(`- ${'#'.repeat(section.level)} ${section.title}`);
+      }
+    }
+    const excerpt = relevantSectionText(content, keywords);
+    if (excerpt.trim()) {
+      lines.push('', `《${primary.title}》相关原文节选（只用于定位要改的段落）：`, '```markdown', excerpt, '```');
+    }
+  }
+
+  const text = lines.join('\n');
+  return text.length > NOTE_BLOCK_LIMIT ? `${text.slice(0, NOTE_BLOCK_LIMIT)}\n…（笔记候选已截断）` : text;
+}
+
+function noteSubjectName(note) {
+  try {
+    if (!note?.subjectId) return '未绑定科目';
+    return require('./subjectManager.js').getSubject(note.subjectId)?.name || '未知科目';
+  } catch {
+    return '未知科目';
+  }
+}
+
+function formatNoteTime(value) {
+  const text = String(value || '').replace('T', ' ');
+  return text.slice(0, 16) || '未知';
 }
 
 /* ------------------------------------------------------------------ 动作解析 */
@@ -481,6 +696,32 @@ function normalizeWriteNotesAction(action) {
   return { type: 'write_notes', subjectId: subjectIdOrEmpty(action.subjectId), notes };
 }
 
+/** 修改已有笔记：只做局部操作，定位信息优先 noteId，其次标题关键词 */
+const NOTE_OPERATIONS = ['replace_section', 'append_after_section', 'replace_text', 'append_to_note', 'replace_whole'];
+
+function normalizeEditNoteAction(action) {
+  const noteId = String(action?.noteId || '').trim().slice(0, 80);
+  const titleQuery = String(action?.titleQuery || '').trim().slice(0, 80);
+  if (!noteId && !titleQuery) return null;
+  const operation = NOTE_OPERATIONS.includes(String(action?.operation || '').trim())
+    ? String(action.operation).trim()
+    : 'replace_section';
+  const content = mathText(action?.content ?? '').trim();
+  if (!content) return null;
+  return {
+    type: 'edit_note',
+    noteId,
+    titleQuery,
+    subjectId: subjectIdOrEmpty(action?.subjectId),
+    operation,
+    section: String(action?.section || '').trim().slice(0, 120),
+    // find 必须和原文逐字一致，这里不做公式规范化
+    find: String(action?.find ?? '').slice(0, 2000),
+    content,
+    wholeNote: action?.wholeNote === true || operation === 'replace_whole',
+  };
+}
+
 /** 生成整科知识清单：交给本地解析管线，避免模型手写上万字被输出上限截断 */
 function normalizeInventoryAction(action) {
   return { type: 'generate_inventory', subjectId: subjectIdOrEmpty(action?.subjectId) };
@@ -558,6 +799,7 @@ function parseAssistantReply(text) {
   const type = String(parsed?.type || '').trim();
   let action = null;
   if (type === 'write_notes') action = normalizeWriteNotesAction(parsed);
+  else if (type === 'edit_note') action = normalizeEditNoteAction(parsed);
   else if (type === 'classify_questions') action = normalizeClassifyQuestionsAction(parsed);
   else if (type === 'generate_inventory') action = normalizeInventoryAction(parsed);
   else if (type === 'import_textbook_questions') action = normalizeTextbookQuestionsAction(parsed);
@@ -637,6 +879,7 @@ module.exports = {
   ACTION_TYPES,
   buildContextSnapshot,
   buildSystemPrompt,
+  buildNotesContext,
   formatContext,
   attachImagesToMessages,
   hasImageMessages,

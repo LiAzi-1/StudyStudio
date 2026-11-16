@@ -811,6 +811,54 @@ function getNote(id) {
   return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
 }
 
+/**
+ * 轻量笔记清单：给 AI 上下文和「改哪一篇」候选用，不把全文读进内存。
+ */
+function listNoteBriefs(options = {}) {
+  const limit = Math.min(500, Math.max(1, Number(options.limit) || 100));
+  const where = [];
+  const params = { limit };
+  if (options.subjectId) {
+    where.push('subject_id = @subjectId');
+    params.subjectId = options.subjectId;
+  }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db
+    .prepare(`
+      SELECT id, title, subject_id, source_type, source_id, source_label,
+             created_at, updated_at, length(content) AS chars, substr(content, 1, 160) AS preview
+      FROM notes ${clause}
+      ORDER BY pinned DESC, updated_at DESC
+      LIMIT @limit
+    `)
+    .all(params);
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title || '',
+    subjectId: row.subject_id || null,
+    sourceType: row.source_type || null,
+    sourceId: row.source_id || null,
+    sourceLabel: row.source_label || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    chars: Number(row.chars) || 0,
+    preview: row.preview || '',
+  }));
+}
+
+/**
+ * 局部编辑专用：只改正文，不重新规范化整篇。
+ * 未涉及段落必须逐字保留，所以不能复用 saveNote 的全文 normalizeMath。
+ */
+function updateNoteContent(id, content) {
+  if (!id) throw new Error('缺少笔记 id');
+  const result = db
+    .prepare('UPDATE notes SET content = @content, updated_at = CURRENT_TIMESTAMP WHERE id = @id')
+    .run({ id, content: String(content ?? '') });
+  if (!result.changes) throw new Error('笔记不存在或没有变化');
+  return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
+}
+
 function deleteNote(id) {
   if (!id) return { success: false };
   db.prepare('DELETE FROM notes WHERE id = ?').run(id);
@@ -1123,6 +1171,8 @@ module.exports = {
   saveNote,
   getNotes,
   getNote,
+  listNoteBriefs,
+  updateNoteContent,
   deleteNote,
   searchNotes,
   getNoteTags,

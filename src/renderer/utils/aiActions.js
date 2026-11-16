@@ -95,7 +95,105 @@ async function generateInventory(action, ctx) {
   if (result.failedChapters?.length) details.push(`${result.failedChapters.length} 章失败`);
   ctx.toast?.({ title: '知识清单已更新', message: details.join('，'), tone: result.truncated || result.failedChapters?.length ? 'warning' : 'success' });
   ctx.onNavigate?.('notes');
-  return `知识清单已写入笔记库（${result.chars || 0} 字，${result.chapterCount || 0} 章 / ${result.batches || 0} 批）${result.truncated ? '。注意：有批次被输出上限截断，结果可能不完整' : ''}。`;
+
+  // 实际执行范围与计划不一致时（续跑、失败、批次变化）如实说明
+  const planned = ctx.plan?.details?.inventory || null;
+  const differences = [];
+  const actualRequestBatches = Math.max(0, Number(result.batches || 0) - Number(result.skippedBatches || 0));
+  if (planned) {
+    if (result.resumedChapters?.length) {
+      differences.push(`续跑命中缓存，跳过 ${result.resumedChapters.length} 章：${result.resumedChapters.map((item) => item.title || item).join('、')}`);
+    }
+    if (result.failedChapters?.length) {
+      differences.push(`${result.failedChapters.length} 章生成失败、保留旧版：${result.failedChapters.map((item) => item.chapter).join('、')}`);
+    }
+    if (Number.isFinite(Number(planned.requestBatches)) && actualRequestBatches !== Number(planned.requestBatches)) {
+      differences.push(`计划请求 ${planned.requestBatches} 批，实际请求 ${actualRequestBatches} 批`);
+    }
+    const plannedChapters = Array.isArray(planned.selectedChapters) ? planned.selectedChapters.length : null;
+    if (plannedChapters !== null && Number(result.chapterCount) !== plannedChapters) {
+      differences.push(`计划处理 ${plannedChapters} 章，实际处理 ${result.chapterCount || 0} 章`);
+    }
+  }
+
+  const summary = [
+    `知识清单已写入笔记库（${result.chars || 0} 字，${result.chapterCount || 0} 章 / ${result.batches || 0} 批）${result.truncated ? '。注意：有批次被输出上限截断，结果可能不完整' : ''}。`,
+    differences.length ? `与计划的差异：${differences.join('；')}。` : '',
+  ].filter(Boolean).join('\n');
+
+  return {
+    summary,
+    extraMeta: {
+      actionDiff: {
+        type: 'inventory',
+        planned,
+        actual: {
+          chapters: result.chapterCount || 0,
+          batches: result.batches || 0,
+          requestBatches: actualRequestBatches,
+          resumedChapters: result.resumedChapters || [],
+          failedChapters: result.failedChapters || [],
+          preservedChapters: result.preservedChapters || [],
+        },
+        differences,
+      },
+      noteId: result.noteId || '',
+    },
+  };
+}
+
+/** 修改已有笔记：读原文、局部改写、写前快照、返回差异 */
+async function editNote(action, ctx) {
+  const subjectId = action.subjectId || ctx.subjectId || '';
+  const result = await window.openexam.note.applyEdit({
+    noteId: action.noteId || '',
+    titleQuery: action.titleQuery || '',
+    subjectId,
+    operation: action.operation || 'replace_section',
+    section: action.section || '',
+    find: action.find || '',
+    content: action.content || '',
+    wholeNote: action.wholeNote === true,
+  });
+  if (!result?.success) {
+    throw new Error(result?.message || result?.error || '笔记修改失败');
+  }
+  ctx.onNavigate?.('notes');
+
+  const hunk = result.diff?.hunks?.[0];
+  const rangeText = hunk
+    ? (result.diff.removedLines && result.diff.addedLines
+      ? `第 ${hunk.beforeStart}–${hunk.beforeEnd} 行 → 第 ${hunk.afterStart}–${hunk.afterEnd} 行（替换 ${result.diff.removedLines} 行 / 新增 ${result.diff.addedLines} 行）`
+      : result.diff.addedLines
+        ? `第 ${hunk.afterStart}–${hunk.afterEnd} 行新增 ${result.diff.addedLines} 行`
+        : `第 ${hunk.beforeStart}–${hunk.beforeEnd} 行移除 ${result.diff.removedLines} 行`)
+    : '正文有更新';
+  const sectionText = result.section ? `「${result.section.title}」` : '';
+  const summary = [
+    `已修改笔记《${result.note?.title || '未命名笔记'}》${result.wholeNote ? '（整篇重写）' : sectionText ? `的${sectionText}` : ''}：${rangeText}。`,
+    result.diff?.changedSections?.length ? `涉及小节：${result.diff.changedSections.join('、')}。` : '',
+    result.snapshotPath ? `旧版快照：${result.snapshotPath}` : '',
+  ].filter(Boolean).join('\n');
+
+  return {
+    summary,
+    extraMeta: {
+      actionDiff: {
+        type: 'note',
+        noteId: result.note?.id || '',
+        noteTitle: result.note?.title || '',
+        operation: result.operation,
+        operationLabel: result.operationLabel,
+        section: result.section || null,
+        wholeNote: Boolean(result.wholeNote),
+        snapshotPath: result.snapshotPath || '',
+        beforeChars: result.beforeChars,
+        afterChars: result.afterChars,
+        diff: result.diff,
+      },
+      noteId: result.note?.id || '',
+    },
+  };
 }
 
 async function textbookQuestions(action, ctx) {
@@ -221,6 +319,249 @@ async function planOps(action, ctx) {
     : `计划已更新：${detail.join('；')}。`;
 }
 
+const NOTE_OPERATION_LABELS = {
+  replace_section: '只改这一节',
+  append_after_section: '在这一节后追加',
+  replace_text: '替换指定原文',
+  append_to_note: '追加到笔记末尾',
+  replace_whole: '整篇重写',
+};
+
+function findSubject(ctx, subjectId) {
+  return (ctx.subjects || []).find((item) => item.id === subjectId) || null;
+}
+
+function formatTime(value) {
+  const text = String(value || '').replace('T', ' ');
+  return text.slice(0, 16) || '未知';
+}
+
+function countQuestionsByType(questions = []) {
+  const counter = new Map();
+  for (const question of questions) {
+    const type = String(question?.type || 'single');
+    counter.set(type, (counter.get(type) || 0) + 1);
+  }
+  const names = { single: '单选', multiple: '多选', judge: '判断', fill: '填空', subjective: '主观' };
+  return [...counter.entries()].map(([type, count]) => `${names[type] || type} ${count}`).join('、');
+}
+
+function summarizeChapters(chapters = []) {
+  if (!chapters.length) return '';
+  if (chapters.length <= 4) {
+    return chapters.map((chapter) => `第${chapter.no}章 ${chapter.title}${chapter.fromPage ? `（第 ${chapter.fromPage}–${chapter.toPage} 页）` : ''}`).join('、');
+  }
+  const first = chapters[0];
+  const last = chapters[chapters.length - 1];
+  const sample = chapters.slice(0, 3).map((chapter) => chapter.title).join('、');
+  return `第 ${first.no}–${last.no} 章（共 ${chapters.length} 章：${sample} 等）${first.fromPage ? `，约第 ${first.fromPage}–${last.toPage || '末'} 页` : ''}`;
+}
+
+function describeDiffRange(diff) {
+  const hunk = diff?.hunks?.[0];
+  if (!hunk) return '';
+  if (diff.removedLines && diff.addedLines) {
+    return `第 ${hunk.beforeStart}–${hunk.beforeEnd} 行 → 第 ${hunk.afterStart}–${hunk.afterEnd} 行（替换 ${diff.removedLines} 行 / 新增 ${diff.addedLines} 行）`;
+  }
+  if (diff.addedLines) return `第 ${hunk.afterStart}–${hunk.afterEnd} 行新增 ${diff.addedLines} 行`;
+  return `第 ${hunk.beforeStart}–${hunk.beforeEnd} 行移除 ${diff.removedLines} 行`;
+}
+
+/**
+ * 只读计划：把「点执行后会发生什么」提前说清楚。
+ * 不写库、不调用模型；edit_note / generate_inventory 走主进程的同一份解析逻辑，
+ * 保证计划与执行口径一致。
+ */
+async function buildActionPlan(action, ctx = {}) {
+  const plan = {
+    type: action?.type || '',
+    label: ACTION_LABELS[action?.type] || '执行动作',
+    target: '',
+    scope: [],
+    write: [],
+    cost: [],
+    warnings: [],
+    needsChoice: false,
+    choiceField: '',
+    candidates: [],
+    availableSections: [],
+    error: '',
+    details: {},
+  };
+  if (!action?.type) {
+    plan.error = '缺少动作类型';
+    return plan;
+  }
+
+  try {
+    if (action.type === 'import_questions') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      const subject = findSubject(ctx, subjectId);
+      const count = action.questions?.length || 0;
+      plan.target = `科目：${subject?.name || action.subject || '未指定'}｜试卷《${action.title || '未命名试卷'}》`;
+      plan.scope = [
+        action.appendToPaperId ? `向已有试卷追加 ${count} 道题` : `新建试卷并写入 ${count} 道题`,
+        count ? `题型：${countQuestionsByType(action.questions)}` : '',
+      ].filter(Boolean);
+      plan.write = [action.appendToPaperId ? `题库：追加到试卷 ${action.appendToPaperId}（不新建）` : `题库：新建《${action.title || '未命名试卷'}》`];
+      plan.cost = ['本地写入，不调用模型'];
+    } else if (action.type === 'add_wrong_questions') {
+      const count = action.questions?.length || 0;
+      plan.target = `错题本｜${count} 道错题`;
+      plan.scope = [`新增 ${count} 道错题`, count ? `题型：${countQuestionsByType(action.questions)}` : ''].filter(Boolean);
+      plan.write = ['错题本：新增错题记录'];
+      plan.cost = ['本地写入，不调用模型'];
+    } else if (action.type === 'adjust_plan') {
+      const ops = action.ops || [];
+      plan.target = '今日待办 / 学习计划';
+      plan.scope = ops.map((op) => {
+        if (op.op === 'add') return `新增「${op.title}」（目标 ${op.target?.value || 1}）`;
+        if (op.op === 'update') return `修改「${op.title || op.id}」${op.target?.value ? `，目标改为 ${op.target.value}` : ''}`;
+        return `删除「${op.title || op.id}」`;
+      });
+      plan.write = ['今日待办：按上述条目增删改'];
+      plan.cost = ['本地写入，不调用模型'];
+    } else if (action.type === 'write_notes') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      const subject = findSubject(ctx, subjectId);
+      const notes = action.notes || [];
+      plan.target = `科目：${subject?.name || '未绑定科目'}｜笔记库`;
+      plan.scope = [`新建 ${notes.length} 篇笔记${notes.length ? `：${notes.map((note) => note.title).filter(Boolean).slice(0, 6).join('、')}` : ''}`];
+      plan.write = ['笔记库：新建笔记（不会覆盖已有笔记）', '保存后同步到 Obsidian'];
+      plan.cost = ['本地写入，不调用模型'];
+      plan.warnings = ['只新建、不覆盖；要改已有笔记请用「修改笔记」'];
+    } else if (action.type === 'edit_note') {
+      const subjectId = action.subjectId || ctx.subjectId || '';
+      if (!window.openexam?.note?.planEdit) throw new Error('当前版本不支持笔记修改');
+      const result = await window.openexam.note.planEdit({
+        noteId: action.noteId || '',
+        titleQuery: action.titleQuery || '',
+        subjectId,
+        operation: action.operation || 'replace_section',
+        section: action.section || '',
+        find: action.find || '',
+        content: action.content || '',
+        wholeNote: action.wholeNote === true,
+      });
+      if (!result || result.success === false) {
+        throw new Error(result?.message || result?.error || '读取笔记修改计划失败');
+      }
+      plan.details.note = result;
+      if (result.ok) {
+        const note = result.note;
+        plan.target = `笔记《${note.title}》｜科目：${note.subjectName || '未绑定'}｜更新：${formatTime(note.updatedAt)}｜${note.chars} 字`;
+        plan.scope = [
+          `操作：${result.operationLabel || NOTE_OPERATION_LABELS[result.operation] || result.operation}${result.section ? ` · 「${result.section.title}」（第 ${result.section.startLine}–${result.section.endLine} 行）` : ''}`,
+          describeDiffRange(result.diff),
+          result.diff?.changedSections?.length ? `涉及小节：${result.diff.changedSections.join('、')}` : '',
+          '未涉及的段落保持原样',
+        ].filter(Boolean);
+        plan.write = [`写入笔记《${note.title}》（${note.id}）`, '写入前保留旧版快照'];
+        plan.cost = ['本地写入，不调用模型'];
+        if (result.wholeNote) plan.warnings.push('这是整篇重写，原有正文会被整体替换');
+      } else {
+        plan.error = result.message || '需要先确认要改哪一篇 / 哪一节';
+        plan.needsChoice = Boolean(result.needsChoice && (result.candidates || []).length);
+        plan.choiceField = result.choiceField || '';
+        plan.candidates = result.candidates || [];
+        plan.availableSections = result.availableSections || [];
+        if (result.note) {
+          plan.target = `笔记《${result.note.title}》｜科目：${result.note.subjectName || '未绑定'}｜${result.note.chars} 字`;
+        }
+        if (plan.needsChoice) {
+          plan.scope.push(plan.choiceField === 'section' ? '需要你先选择具体小节，选完会重新生成计划' : '需要你先选择具体一篇笔记，选完会重新生成计划');
+        }
+        if (plan.availableSections.length) {
+          plan.scope.push(`笔记里可用的节：${plan.availableSections.slice(0, 8).map((section) => section.title).join('、')}`);
+        }
+      }
+    } else if (action.type === 'generate_inventory') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      if (!subjectId) throw new Error('当前对话没有绑定科目');
+      if (!window.openexam?.subject?.planInventory) throw new Error('当前版本不支持知识清单计划');
+      const result = await window.openexam.subject.planInventory({
+        subjectId,
+        settings: ctx.settings,
+        source: action.source || (action.materialId ? 'material' : 'auto'),
+        materialId: action.materialId || '',
+        startChapter: action.startChapter || '',
+        learnedChapters: Array.isArray(action.learnedChapters) ? action.learnedChapters : [],
+        fromPage: Number(action.fromPage) || 0,
+        toPage: Number(action.toPage) || 0,
+        modules: Array.isArray(action.modules) ? action.modules : [],
+        keepExisting: action.keepExisting !== false,
+        forceRerun: action.forceRerun === true,
+        concurrency: Number(action.concurrency) || 0,
+      });
+      if (!result?.success) throw new Error(result?.error || '生成知识清单计划失败');
+      plan.details.inventory = result;
+      const totalChars = (result.chapterPlan || []).reduce((sum, item) => sum + (item.chars || 0), 0);
+      plan.target = `科目：${result.subject?.name || '当前科目'}｜资料来源：${result.source?.type === 'primary' ? '主教材' : '补充资料'}《${result.source?.name || '未知'}》`;
+      plan.scope = [
+        `本次重写 ${result.selectedChapters?.length || 0} 章：${summarizeChapters(result.selectedChapters || [])}`,
+        result.preservedChapters?.length ? `保留 ${result.preservedChapters.length} 章原文：${result.preservedChapters.map((chapter) => `第${chapter.no}章`).join('、')}` : '',
+        action.learnedChapters?.length ? `已学章节按「已学·待测」标注：${action.learnedChapters.join('、')}` : '',
+        result.forceRerun ? '已选择强制重跑：不使用章节缓存' : (result.resumedChapters?.length ? `续跑复用 ${result.resumedChapters.length} 章：${result.resumedChapters.map((item) => item.title).join('、')}（不重新请求）` : '没有可复用的章节缓存'),
+      ].filter(Boolean);
+      plan.write = [
+        `覆盖/更新笔记《${result.writeNoteTitle}》${result.existingNote ? '（已有，将更新）' : '（新建）'}`,
+        `写入前保留旧版快照：${result.snapshotHint || '教材/清单快照/'}`,
+        '同时更新该科目的知识清单摘要，供题库分类使用',
+      ];
+      plan.cost = [
+        `共 ${result.totalBatches} 批：本次请求 ${result.requestBatches} 批${result.skippedBatches ? `，续跑复用 ${result.skippedBatches} 批` : ''}`,
+        `并发 ${result.concurrency} 路`,
+        `条目估计：约 ${result.estimatedEntries} 条（按原文 ${totalChars} 字估算，实际以模型输出为准）`,
+      ];
+      if (result.structureWarnings?.length) plan.warnings.push(...result.structureWarnings);
+      const autoChapters = (result.selectedChapters || []).filter((chapter) => chapter.auto);
+      if (autoChapters.length) plan.warnings.push(`${autoChapters.length} 章的页码是自动推断的，建议先在「科目 → 章节结构」校正`);
+    } else if (action.type === 'import_textbook_questions') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      const subject = findSubject(ctx, subjectId);
+      const from = action.pages?.from;
+      const to = action.pages?.to;
+      plan.target = `科目：${subject?.name || '未指定'}｜资料来源：${action.materialIds?.length ? `指定补充资料（${action.materialIds.length} 份）` : '主教材优先，没有则补充资料'}`;
+      plan.scope = [
+        from || to ? `页码范围：第 ${from || 1}–${to || '末'} 页` : '未指定页码：按整份资料识别',
+        action.paperId ? `追加到已有试卷 ${action.paperId}` : `新建试卷《${action.title || '资料例题习题'}》`,
+        '识别不出的页面会如实跳过，不会编题',
+      ];
+      plan.write = [action.paperId ? '题库：向已有试卷追加题目' : '题库：新建试卷并写入题目'];
+      plan.cost = [
+        from && to ? `预计扫描 ${Math.max(1, to - from + 1)} 页，逐页/分段识别` : '按资料长度分段识别',
+        '没有断点续跑缓存，失败需要重新发起',
+      ];
+    } else if (action.type === 'classify_questions') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      const subject = findSubject(ctx, subjectId);
+      plan.target = `科目：${subject?.name || '当前科目'}｜题库分类`;
+      plan.scope = [action.onlyMissing ? '只补缺失的章节/知识点分类' : '重新分类该科目全部题目'];
+      plan.write = ['题目的 chapter / knowledge 分类字段（不删除题目）'];
+      plan.cost = ['逐题/分批调用模型，题数取决于该科目题库'];
+    } else if (action.type === 'update_subject_profile') {
+      const subjectId = action.subjectId || ctx.subjectId;
+      const subject = findSubject(ctx, subjectId);
+      plan.target = `科目：${subject?.name || '当前科目'}｜学习基础`;
+      plan.scope = Object.entries(action.profile || {})
+        .filter(([, value]) => value !== '' && value !== null && value !== undefined)
+        .map(([key, value]) => `${key}：${value}`);
+      plan.write = ['科目资料：学习基础 / 可用时间'];
+      plan.cost = ['本地写入，不调用模型'];
+    } else if (action.type === 'add_subject') {
+      plan.target = `新科目《${action.name}》`;
+      plan.scope = ['创建科目', action.examDate ? `考试日期：${action.examDate}` : '未设置考试日期', '创建后绑定到当前对话'];
+      plan.write = ['科目列表：新增一项'];
+      plan.cost = ['本地写入，不调用模型'];
+    } else {
+      plan.error = `暂不支持的动作：${action.type}`;
+    }
+  } catch (error) {
+    plan.error = error?.message || String(error);
+  }
+  return plan;
+}
+
 async function applyAIAction(action, ctx = {}) {
   if (!action?.type) throw new Error('缺少动作类型');
   switch (action.type) {
@@ -228,6 +569,7 @@ async function applyAIAction(action, ctx = {}) {
     case 'add_wrong_questions': return wrongQuestions(action, ctx);
     case 'adjust_plan': return planOps(action, ctx);
     case 'write_notes': return writeNotes(action, ctx);
+    case 'edit_note': return editNote(action, ctx);
     case 'generate_inventory': return generateInventory(action, ctx);
     case 'import_textbook_questions': return textbookQuestions(action, ctx);
     case 'update_subject_profile': return subjectProfile(action, ctx);
@@ -242,6 +584,7 @@ const ACTION_LABELS = {
   add_wrong_questions: '加入错题本',
   adjust_plan: '调整学习计划',
   write_notes: '写入笔记',
+  edit_note: '修改笔记',
   generate_inventory: '生成知识清单',
   import_textbook_questions: '从资料导入题目',
   update_subject_profile: '存档学习基础',
@@ -261,6 +604,12 @@ function describeAction(action) {
     detail = `${action.ops?.length || 0} 项计划调整`;
   } else if (action.type === 'write_notes') {
     detail = (action.notes || []).map((note) => note.title).filter(Boolean).join('、');
+  } else if (action.type === 'edit_note') {
+    detail = [
+      action.titleQuery || '指定笔记',
+      NOTE_OPERATION_LABELS[action.operation] || '局部修改',
+      action.section || '',
+    ].filter(Boolean).join(' · ');
   } else if (action.type === 'add_subject') {
     detail = action.name || '';
   } else if (action.type === 'import_textbook_questions') {
@@ -273,4 +622,4 @@ function describeAction(action) {
   return { label, detail };
 }
 
-export { applyAIAction, describeAction, ACTION_LABELS };
+export { applyAIAction, describeAction, buildActionPlan, ACTION_LABELS };

@@ -840,7 +840,7 @@ export default function Subjects({ onNavigate }) {
     if (!structurePanel) return;
     const ok = await confirm({
       title: "按原文重新识别章节结构？",
-      message: "会覆盖你手动改过的页码和标题。",
+      message: "会覆盖你手动改过的页码和标题；覆盖前先把当前结构备份到「章节结构备份」目录。",
       confirmText: "重新识别",
       tone: "warning",
     });

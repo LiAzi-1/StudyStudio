@@ -99,6 +99,10 @@ function buildSystem({ database, subjectId, messages, questionContext }) {
   const context = assistantAgent.buildContextSnapshot(database);
   const subjectBlock = buildSubjectBlock(subjectId, { messages });
   let system = assistantAgent.buildSystemPrompt(context, subjectBlock.text);
+  const notesBlock = assistantAgent.buildNotesContext(database, { subjectId, messages });
+  if (notesBlock) {
+    system += `\n\n${notesBlock}`;
+  }
   if (questionContext) {
     system += `\n\n## 本次会话锁定的题目\n用户正在追问下面这道题。讲解与动作都要围绕它，不要把上下文丢掉；如果用户换了新题，以新题为准。\n\n${buildQuestionContextPrompt(questionContext)}`;
   }

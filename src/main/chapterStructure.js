@@ -15,8 +15,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const subjectManager = require('./subjectManager.js');
 const materialManager = require('./materialManager.js');
+const { repairGhostText } = require('./textRepair.js');
 
 const STRUCTURE_FILE = '章节结构.json';
 const PAGE_MARK_RE = /<!--\s*第\s*(\d+)\s*页[^>]*-->/g;
@@ -165,12 +167,14 @@ function scanHeadingChapters(markdown) {
  * @returns {{ chapters: Array, warnings: string[] }}
  */
 function buildChaptersFromMarkdown(markdown, { totalPages = 0 } = {}) {
-  const pageInfo = splitPages(markdown);
+  // 与知识清单共用同一套幽灵文字层修复；直接调用本函数时也不会拿到未修复原文
+  const markdownText = repairGhostText(markdown).text;
+  const pageInfo = splitPages(markdownText);
   const pages = Number(totalPages) || pageInfo.totalPages;
   const warnings = [];
 
   if (!pageInfo.hasPageMarks) {
-    const chapters = scanHeadingChapters(markdown);
+    const chapters = scanHeadingChapters(markdownText);
     if (chapters.length === 1 && chapters[0].auto) {
       warnings.push('资料没有页码标记，也没有可识别的标题，已按全文作为一章处理');
     }
@@ -315,7 +319,11 @@ function structurePath(subjectId, sourceKey) {
   return path.join(dir, '资料', '转写', `${materialId}.${STRUCTURE_FILE}`);
 }
 
-/** 解析来源：主教材 / 指定补充资料 / 无主教材时唯一可读补充资料 */
+function sourceTextHash(markdown) {
+  return crypto.createHash('sha256').update(String(markdown || ''), 'utf8').digest('hex');
+}
+
+/** 解析来源：主教材 / 指定补充资料 / 无主教材时唯一可读补充资料；旧文件只在内存中修复 */
 function resolveSource(subjectId, sourceKey = 'auto') {
   const dir = subjectDir(subjectId);
   const subject = subjectManager.getSubject(subjectId);
@@ -323,7 +331,7 @@ function resolveSource(subjectId, sourceKey = 'auto') {
   if (key === 'primary' || key === 'auto') {
     const primaryFile = path.join(dir, '教材', '教材全文.md');
     if (fs.existsSync(primaryFile)) {
-      const markdown = fs.readFileSync(primaryFile, 'utf8');
+      const markdown = repairGhostText(fs.readFileSync(primaryFile, 'utf8')).text;
       const pageInfo = splitPages(markdown);
       return {
         key: 'primary',
@@ -331,6 +339,7 @@ function resolveSource(subjectId, sourceKey = 'auto') {
         id: null,
         name: subject?.textbookName || subject?.name || '主教材',
         markdown,
+        textHash: sourceTextHash(markdown),
         totalPages: Number(subject?.textbookPages) || pageInfo.totalPages,
         textPath: path.join('教材', '教材全文.md'),
       };
@@ -372,6 +381,7 @@ function resolveSource(subjectId, sourceKey = 'auto') {
     id: target.id,
     name: target.name || '补充资料',
     markdown,
+    textHash: sourceTextHash(markdown),
     totalPages: Number(target.totalPages) || pageInfo.totalPages,
     textPath: target.textPath || '',
   };
@@ -421,12 +431,10 @@ function readStructure(subjectId, sourceKey) {
   }
 }
 
-function writeStructure(subjectId, sourceInfo, payload) {
-  const file = structurePath(subjectId, sourceInfo.key);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+function makeStructureData(sourceInfo, payload) {
   const chapters = normalizeChapters(payload.chapters);
-  const data = {
-    version: 1,
+  return {
+    version: 2,
     source: {
       key: sourceInfo.key,
       type: sourceInfo.type,
@@ -434,6 +442,8 @@ function writeStructure(subjectId, sourceInfo, payload) {
       name: sourceInfo.name,
       totalPages: Number(sourceInfo.totalPages) || 0,
       textPath: sourceInfo.textPath || '',
+      // 指纹基于修复后的正文；教材变化或旧结构没有指纹时都需要重新识别
+      textHash: sourceInfo.textHash || sourceTextHash(sourceInfo.markdown),
     },
     generatedAt: payload.generatedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -441,31 +451,80 @@ function writeStructure(subjectId, sourceInfo, payload) {
     warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
     chapters,
   };
+}
+
+function writeStructure(subjectId, sourceInfo, payload) {
+  const file = structurePath(subjectId, sourceInfo.key);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const data = makeStructureData(sourceInfo, payload);
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
   return { file, data };
 }
 
-/**
- * 取章节结构：已有则读，没有则现场识别并落盘。
- * @returns {{structure:object, file:string, created:boolean}}
- */
-function getStructure({ subjectId, source = 'auto' } = {}) {
-  const sourceInfo = resolveSource(subjectId, source);
-  const existing = readStructure(subjectId, sourceInfo.key);
-  if (existing) {
-    return { structure: existing, file: structurePath(subjectId, sourceInfo.key), created: false };
-  }
-  const { chapters, warnings } = buildChaptersFromMarkdown(sourceInfo.markdown, { totalPages: sourceInfo.totalPages });
-  const written = writeStructure(subjectId, sourceInfo, { chapters, warnings, detected: chapters.filter((item) => !item.auto).length });
-  return { structure: written.data, file: written.file, created: true };
+function isStructureStale(structure, sourceInfo) {
+  const savedHash = String(structure?.source?.textHash || '');
+  return !savedHash || savedHash !== sourceInfo.textHash;
 }
 
-/** 重新识别并覆盖结构表（界面「重新识别」用） */
-function rebuildStructure({ subjectId, source = 'auto' } = {}) {
+/** 覆盖前保留旧结构；备份失败会中止重新识别，避免手工校正被冲掉 */
+function backupExistingStructure(subjectId, sourceKey) {
+  const file = structurePath(subjectId, sourceKey);
+  if (!fs.existsSync(file)) return '';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = path.join(path.dirname(file), '章节结构备份');
+  fs.mkdirSync(dir, { recursive: true });
+  const backup = path.join(dir, `${path.basename(file, '.json')}-${stamp}.json`);
+  fs.copyFileSync(file, backup);
+  return backup;
+}
+
+/**
+ * 取章节结构：指纹一致才复用；缺失或教材变化时重新识别。
+ * persist=false 供只读计划使用，不写结构也不创建备份。
+ */
+function getStructure({ subjectId, source = 'auto', persist = true } = {}) {
+  const sourceInfo = resolveSource(subjectId, source);
+  const existing = readStructure(subjectId, sourceInfo.key);
+  if (existing && !isStructureStale(existing, sourceInfo)) {
+    return { structure: existing, file: structurePath(subjectId, sourceInfo.key), created: false, refreshed: false };
+  }
+
+  const reason = existing
+    ? (existing.source?.textHash
+      ? '教材文本已变化，旧章节结构已失效，已按当前教材重新识别'
+      : '旧结构未记录教材文本指纹，已按当前教材重新识别')
+    : '';
+  if (!persist) {
+    const { chapters, warnings } = buildChaptersFromMarkdown(sourceInfo.markdown, { totalPages: sourceInfo.totalPages });
+    const data = makeStructureData(sourceInfo, {
+      chapters,
+      warnings: [reason, ...warnings].filter(Boolean),
+      detected: chapters.filter((item) => !item.auto).length,
+    });
+    return {
+      structure: data,
+      file: structurePath(subjectId, sourceInfo.key),
+      created: false,
+      refreshed: Boolean(existing),
+      backupPath: '',
+    };
+  }
+
+  const rebuilt = rebuildStructure({ subjectId, source: sourceInfo.key, reason });
+  return { ...rebuilt, created: !existing, refreshed: Boolean(existing) };
+}
+
+/** 重新识别并覆盖结构表（界面「重新识别」用）；覆盖前先备份旧版 */
+function rebuildStructure({ subjectId, source = 'auto', reason = '' } = {}) {
   const sourceInfo = resolveSource(subjectId, source);
   const { chapters, warnings } = buildChaptersFromMarkdown(sourceInfo.markdown, { totalPages: sourceInfo.totalPages });
-  const written = writeStructure(subjectId, sourceInfo, { chapters, warnings, detected: chapters.filter((item) => !item.auto).length });
-  return { structure: written.data, file: written.file, created: true };
+  const backupPath = backupExistingStructure(subjectId, sourceInfo.key);
+  const written = writeStructure(subjectId, sourceInfo, {
+    chapters,
+    warnings: [reason, ...warnings].filter(Boolean),
+    detected: chapters.filter((item) => !item.auto).length,
+  });
+  return { structure: written.data, file: written.file, backupPath, created: true };
 }
 
 /** 手动校正：只接受章节数组，页码越界/倒置会被修正 */
@@ -533,4 +592,6 @@ module.exports = {
   structurePath,
   chapterText,
   normalizeChapters,
+  isStructureStale,
+  sourceTextHash,
 };

@@ -568,29 +568,12 @@ function applyModuleRanges(markdown, moduleList, existingChapters = []) {
 }
 
 /**
- * 生成 / 更新知识清单。
- *
- * @param {object} options
- * @param {string} options.subjectId
- * @param {object} options.settings  AI 设置（可含 inventoryMaxTokens / inventoryBatchChars）
- * @param {AbortSignal} [options.signal]
- * @param {Function} [options.onProgress]
- * @param {'auto'|'primary'|'supplementary'|'material:<id>'} [options.source]
- * @param {string} [options.materialId]
- * @param {number|string} [options.startChapter] 起始章节号或标题关键字
- * @param {Array<number|string>} [options.learnedChapters] 已学章节
- * @param {number} [options.fromPage]
- * @param {number} [options.toPage]
- * @param {Array<object>} [options.modules] 用户自定义知识模块
- * @param {boolean} [options.keepExisting=true]
- * @param {boolean} [options.forceRerun=false] 忽略章节缓存，强制重跑
- * @param {number} [options.concurrency] 并发批次数（默认 2，可用 settings.inventoryConcurrency 配置）
+ * 规划知识清单：解析来源、选章节、切批次、检查缓存与旧版清单。
+ * 只读，不调用模型、不写笔记；计划卡与真正生成共用这一份逻辑。
  */
-async function generateKnowledgeInventory({
+function prepareInventoryPlan({
   subjectId,
   settings,
-  signal,
-  onProgress,
   source = 'auto',
   materialId = '',
   startChapter = '',
@@ -600,6 +583,7 @@ async function generateKnowledgeInventory({
   modules = [],
   keepExisting = true,
   forceRerun = false,
+  persistStructure = false,
   concurrency: concurrencyOverride = 0,
 } = {}) {
   const subject = subjectManager.getSubject(subjectId);
@@ -621,9 +605,13 @@ async function generateKnowledgeInventory({
   const readable = { ...sourceInfo, markdown };
   const moduleList = Array.isArray(modules) ? modules.map((item) => ({ ...item })) : [];
 
-  // 结构表：优先读已保存的（用户可能手工校正过），没有则现场识别
-  const saved = chapterStructure.readStructure(subjectId, sourceInfo.key);
-  const baseStructure = saved || chapterStructure.rebuildStructure({ subjectId, source: sourceKey }).structure;
+  // 章节识别和清单共用 resolveSource 修复后的正文；文本指纹变化时旧结构失效。
+  // 只有真正生成（persistStructure=true）才落盘/备份，计划卡保持只读。
+  const baseStructure = chapterStructure.getStructure({
+    subjectId,
+    source: sourceKey,
+    persist: persistStructure,
+  }).structure;
   if (moduleList.length) applyModuleRanges(markdown, moduleList, baseStructure.chapters);
 
   const structure = moduleList.length
@@ -666,6 +654,7 @@ async function generateKnowledgeInventory({
       chapter,
       learned,
       text,
+      chars: text.length,
       hash: chapterHash(text, learned),
       batches,
       batchResults: new Array(batches.length),
@@ -701,6 +690,133 @@ async function generateKnowledgeInventory({
       }
     }
   }
+
+  return {
+    subject,
+    sourceInfo,
+    sourceKey,
+    markdown,
+    readable,
+    moduleList,
+    baseStructure,
+    structure,
+    selected,
+    learnedSet,
+    concurrency,
+    retryOptions,
+    maxTokens,
+    plan,
+    totalBatches,
+    existing,
+    existingBlocks,
+    cacheData,
+    resumedChapters,
+    skippedBatches,
+  };
+}
+
+/**
+ * 知识清单计划：给动作卡展示「改哪些章、保留哪些章、多少批、是否续跑复用」。
+ * 只读，不会触发模型调用或写库。
+ */
+function planKnowledgeInventory(options = {}) {
+  const prepared = prepareInventoryPlan(options);
+  const selectedNos = new Set(prepared.selected.map((chapter) => chapter.no));
+  const existingNos = [...new Set(prepared.existingBlocks.map((block) => block.no).filter(Boolean))];
+  const preservedChapters = existingNos
+    .filter((no) => !selectedNos.has(no))
+    .sort((a, b) => a - b)
+    .map((no) => {
+      const block = prepared.existingBlocks.find((item) => item.no === no);
+      return { no, title: String(block?.heading || '').replace(/^##\s*(模块\d+\s*)?/, '') };
+    });
+  const totalChars = prepared.plan.reduce((sum, item) => sum + item.chars, 0);
+  const estimatedEntries = Math.max(prepared.selected.length, Math.round(totalChars / 320));
+
+  return {
+    success: true,
+    subject: { id: prepared.subject.id, name: prepared.subject.name },
+    source: {
+      key: prepared.sourceInfo.key,
+      type: prepared.sourceInfo.type,
+      name: prepared.sourceInfo.name,
+      totalPages: prepared.sourceInfo.totalPages,
+    },
+    structureWarnings: prepared.structure.warnings || [],
+    selectedChapters: prepared.selected.map((chapter) => ({
+      no: chapter.no,
+      title: chapter.title,
+      fromPage: chapter.fromPage,
+      toPage: chapter.toPage,
+      auto: Boolean(chapter.auto),
+      chars: prepared.plan.find((item) => item.chapter.no === chapter.no)?.chars || 0,
+    })),
+    chapterPlan: prepared.plan.map((item) => ({
+      no: item.chapter.no,
+      title: item.chapter.title,
+      fromPage: item.chapter.fromPage,
+      toPage: item.chapter.toPage,
+      chars: item.chars,
+      batches: item.batches.length,
+      resumed: Boolean(item.cachedEntries),
+    })),
+    preservedChapters,
+    totalBatches: prepared.totalBatches,
+    requestBatches: prepared.totalBatches - prepared.skippedBatches,
+    skippedBatches: prepared.skippedBatches,
+    resumedChapters: prepared.resumedChapters,
+    forceRerun: Boolean(options.forceRerun),
+    concurrency: prepared.concurrency,
+    estimatedEntries,
+    existingNote: prepared.existing
+      ? { id: prepared.existing.id, title: prepared.existing.title, chars: String(prepared.existing.content || '').length }
+      : null,
+    writeNoteTitle: `知识清单 · ${prepared.subject.name}`,
+    snapshotHint: '教材/清单快照/',
+  };
+}
+
+/**
+ * 生成 / 更新知识清单。
+ *
+ * @param {object} options
+ * @param {string} options.subjectId
+ * @param {object} options.settings  AI 设置（可含 inventoryMaxTokens / inventoryBatchChars）
+ * @param {AbortSignal} [options.signal]
+ * @param {Function} [options.onProgress]
+ * @param {'auto'|'primary'|'supplementary'|'material:<id>'} [options.source]
+ * @param {string} [options.materialId]
+ * @param {number|string} [options.startChapter] 起始章节号或标题关键字
+ * @param {Array<number|string>} [options.learnedChapters] 已学章节
+ * @param {number} [options.fromPage]
+ * @param {number} [options.toPage]
+ * @param {Array<object>} [options.modules] 用户自定义知识模块
+ * @param {boolean} [options.keepExisting=true]
+ * @param {boolean} [options.forceRerun=false] 忽略章节缓存，强制重跑
+ * @param {number} [options.concurrency] 并发批次数（默认 2，可用 settings.inventoryConcurrency 配置）
+ */
+async function generateKnowledgeInventory(options = {}) {
+  const { subjectId, settings, signal, onProgress, keepExisting = true, forceRerun = false } = options;
+  const prepared = prepareInventoryPlan({ ...options, persistStructure: true });
+  const {
+    subject,
+    sourceInfo,
+    moduleList,
+    baseStructure,
+    structure,
+    selected,
+    concurrency,
+    retryOptions,
+    maxTokens,
+    plan,
+    totalBatches,
+    existing,
+    existingBlocks,
+    cacheData,
+    resumedChapters,
+    skippedBatches,
+  } = prepared;
+
 
   const regenerated = new Map();
   const failedChapters = [];
@@ -1127,6 +1243,8 @@ async function generateKnowledgeInventory({
 
 module.exports = {
   generateKnowledgeInventory,
+  planKnowledgeInventory,
+  prepareInventoryPlan,
   splitChapterBatches,
   extractJsonObjects,
   normalizeEntry,

@@ -444,6 +444,15 @@ ipcMain.handle("db:renameAIChatSession", (event, sessionId, title) => {
   return database.renameAIChatSession(sessionId, title);
 });
 
+// 对话体验补充：会话搜索（标题 + 消息正文）与置顶
+ipcMain.handle("db:searchAIChatSessions", (event, query, limit) => {
+  return database.searchAIChatSessions(query, limit || 100);
+});
+
+ipcMain.handle("db:setAIChatSessionPinned", (event, sessionId, pinned) => {
+  return database.setAIChatSessionPinned(sessionId, Boolean(pinned));
+});
+
 ipcMain.handle("db:deleteAIChatSession", (event, sessionId) => {
   const result = database.deleteAIChatSession(sessionId);
   // 会话删掉后，图片目录也一并清理，避免 userData 越用越大
@@ -592,6 +601,37 @@ ipcMain.handle("note:search", (event, { keyword, options } = {}) => {
 
 ipcMain.handle("note:tags", () => {
   return database.getNoteTags();
+});
+
+/** 笔记候选：按标题/关键词列出，带科目、更新时间、字数 */
+ipcMain.handle("note:candidates", (event, options = {}) => {
+  try {
+    const noteEditor = require("./src/main/noteEditor.js");
+    return { success: true, items: noteEditor.listNoteCandidates(database, options || {}) };
+  } catch (error) {
+    return { success: false, error: error?.message || "读取笔记候选失败", items: [] };
+  }
+});
+
+/** 修改已有笔记：先出只读计划（目标、小节、差异范围），用户确认后再写 */
+ipcMain.handle("note:planEdit", (event, input = {}) => {
+  try {
+    const noteEditor = require("./src/main/noteEditor.js");
+    return { success: true, ...noteEditor.planNoteEdit(database, input || {}) };
+  } catch (error) {
+    return { success: false, ok: false, message: error?.message || "生成笔记修改计划失败" };
+  }
+});
+
+ipcMain.handle("note:applyEdit", (event, input = {}) => {
+  try {
+    const noteEditor = require("./src/main/noteEditor.js");
+    const result = noteEditor.applyNoteEdit(database, input || {});
+    if (result?.success) obsidianSync.schedulePush();
+    return result;
+  } catch (error) {
+    return { success: false, ok: false, message: error?.message || "笔记修改失败", error: error?.message || "笔记修改失败" };
+  }
 });
 
 /* --------------------------------------------- 笔记 AI 助教 / Obsidian 桥接 */
@@ -1853,8 +1893,8 @@ ipcMain.handle("materials:pickPrimary", async () => {
 ipcMain.handle("subject:chapterStructure", (event, { subjectId, source = "auto" } = {}) => {
   try {
     const chapterStructure = require("./src/main/chapterStructure.js");
-    const { structure, file, created } = chapterStructure.getStructure({ subjectId, source });
-    return { success: true, structure, file, created };
+    const { structure, file, created, refreshed, backupPath } = chapterStructure.getStructure({ subjectId, source });
+    return { success: true, structure, file, created, refreshed, backupPath };
   } catch (error) {
     return { success: false, error: error?.message || "读取章节结构失败" };
   }
@@ -1875,10 +1915,21 @@ ipcMain.handle("subject:saveChapterStructure", (event, { subjectId, source = "au
 ipcMain.handle("subject:rebuildChapterStructure", (event, { subjectId, source = "auto" } = {}) => {
   try {
     const chapterStructure = require("./src/main/chapterStructure.js");
-    const { structure, file } = chapterStructure.rebuildStructure({ subjectId, source });
-    return { success: true, structure, file };
+    const { structure, file, backupPath } = chapterStructure.rebuildStructure({ subjectId, source });
+    return { success: true, structure, file, backupPath };
   } catch (error) {
     return { success: false, error: error?.message || "重新识别章节结构失败" };
+  }
+});
+
+/** 知识清单计划（只读）：章节范围、保留章节、批次数、续跑复用 */
+ipcMain.handle("subject:planInventory", (event, payload = {}) => {
+  try {
+    const knowledgeInventory = require("./src/main/knowledgeInventory.js");
+    const result = knowledgeInventory.planKnowledgeInventory(payload || {});
+    return { success: true, ...result };
+  } catch (error) {
+    return { success: false, error: error?.message || "生成知识清单计划失败" };
   }
 });
 

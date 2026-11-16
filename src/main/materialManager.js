@@ -19,6 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const subjectManager = require('./subjectManager.js');
+const { repairGhostText } = require('./textRepair.js');
 
 const MATERIAL_DIR = '资料';
 const INDEX_FILE = '资料清单.json';
@@ -171,7 +172,8 @@ function addSupplementary({ subjectId, filePath, name } = {}) {
   };
 
   if (isText) {
-    const text = fs.readFileSync(path.join(dir, FILES_DIR, `${id}${ext}`), 'utf8');
+    const raw = fs.readFileSync(path.join(dir, FILES_DIR, `${id}${ext}`), 'utf8');
+    const text = repairGhostText(raw).text;
     const rel = path.join(MATERIAL_DIR, TEXT_DIR, `${id}.md`);
     fs.writeFileSync(path.join(dir, TEXT_DIR, `${id}.md`), text, 'utf8');
     entry.textPath = rel;
@@ -211,7 +213,7 @@ function patchSupplementary(subjectId, id, patch = {}) {
 function finishSupplementary({ subjectId, id, markdown, pages = 0, totalPages = pages, missingPages = [] } = {}) {
   const dir = materialDir(subjectId);
   const rel = path.join(MATERIAL_DIR, TEXT_DIR, `${id}.md`);
-  const text = String(markdown || '').trim();
+  const text = repairGhostText(String(markdown || '').trim()).text;
   if (!text) throw new Error('没有可保存的转写内容');
   fs.writeFileSync(path.join(dir, TEXT_DIR, `${id}.md`), text, 'utf8');
   return patchSupplementary(subjectId, id, {
@@ -230,7 +232,8 @@ function readSupplementaryText(subjectId, id) {
   if (!item?.textPath) return '';
   const root = subjectManager.getSubjectDir(subjectId);
   const abs = path.join(root, item.textPath);
-  try { return fs.readFileSync(abs, 'utf8'); } catch { return ''; }
+  // 旧转写只在内存中修复，不回写用户的资料文件
+  try { return repairGhostText(fs.readFileSync(abs, 'utf8')).text; } catch { return ''; }
 }
 
 /** 主教材全文路径 */
