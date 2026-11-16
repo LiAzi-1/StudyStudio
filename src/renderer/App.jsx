@@ -1429,7 +1429,113 @@ function AppMain() {
       {showOnboarding || onboardingClosing ? null : (
         <ImportTaskDock onOpenImport={() => setPage("import")} onOpenReview={handleOpenReview} />
       )}
+      <InventoryProgressDock />
       {onboarding}
+    </div>
+  );
+}
+
+/** 知识清单按章分批的全局进度：显示当前章节/批次、已用时间与剩余预估、续跑跳过与失败原因 */
+function InventoryProgressDock() {
+  const [state, setState] = useState(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const dispose = window.openexam?.subject?.onInventoryProgress?.((payload) => {
+      if (!payload) return;
+      setState((prev) => {
+        if (payload.stage === 'plan') {
+          return {
+            stage: 'plan',
+            startedAt: Date.now(),
+            done: payload.done || 0,
+            total: payload.total || 0,
+            elapsedMs: 0,
+            etaMs: null,
+            resumed: payload.resumedChapters || [],
+            lastError: '',
+            chapter: '',
+            batch: 0,
+            message: payload.message || '',
+          };
+        }
+        if (payload.stage === 'done') {
+          return {
+            ...(prev || {}),
+            stage: 'done',
+            done: payload.done ?? prev?.done ?? 0,
+            total: payload.total ?? prev?.total ?? 0,
+            elapsedMs: payload.elapsedMs ?? Date.now() - (prev?.startedAt || Date.now()),
+            etaMs: 0,
+            message: payload.message || '',
+            finishedAt: Date.now(),
+          };
+        }
+        return {
+          ...(prev || {}),
+          stage: payload.stage,
+          startedAt: prev?.startedAt || Date.now(),
+          done: payload.done ?? prev?.done ?? 0,
+          total: payload.total ?? prev?.total ?? 0,
+          elapsedMs: payload.elapsedMs ?? prev?.elapsedMs ?? 0,
+          etaMs: payload.etaMs ?? prev?.etaMs ?? null,
+          chapter: payload.chapter || prev?.chapter || '',
+          chapterNo: payload.chapterNo ?? prev?.chapterNo,
+          batch: payload.batch ?? prev?.batch ?? 0,
+          chapterBatches: payload.chapterBatches ?? prev?.chapterBatches,
+          entries: payload.entries ?? prev?.entries ?? 0,
+          resumed: payload.resumedChapters || prev?.resumed || [],
+          lastError: payload.stage === 'batch:failed' ? (payload.message || payload.error || '批次失败') : (prev?.lastError || ''),
+          message: payload.message || prev?.message || '',
+        };
+      });
+    });
+    return () => dispose?.();
+  }, []);
+
+  useEffect(() => {
+    if (!state || state.stage === 'done') return undefined;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [state]);
+
+  useEffect(() => {
+    if (state?.stage !== 'done') return undefined;
+    const timer = setTimeout(() => setState(null), 10000);
+    return () => clearTimeout(timer);
+  }, [state?.stage]);
+
+  if (!state) return null;
+  const total = Number(state.total) || 0;
+  const done = Math.min(Number(state.done) || 0, total || Number(state.done) || 0);
+  const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const elapsedMs = state.stage === 'done'
+    ? (state.elapsedMs || 0)
+    : (state.startedAt ? Math.max(state.elapsedMs || 0, now - state.startedAt) : 0);
+  const etaSeconds = Number(state.etaMs) > 0 ? Math.ceil(Number(state.etaMs) / 1000) : null;
+  const fmt = (seconds) => {
+    if (!Number.isFinite(seconds) || seconds < 0) return '—';
+    const min = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+    return min ? `${min}m${String(sec).padStart(2, '0')}s` : `${sec}s`;
+  };
+  const active = state.stage !== 'done';
+  return (
+    <div className={`inventory-progress ${state.lastError ? 'has-error' : ''}`}>
+      <div className="inventory-progress-head">
+        <strong>{state.stage === 'done' ? '知识清单已生成' : '正在按章生成知识清单'}</strong>
+        <span>{done}/{total} 批 · {pct}%</span>
+      </div>
+      <div className="inventory-progress-bar"><div style={{ width: `${pct}%` }} /></div>
+      <div className="inventory-progress-meta">
+        {state.chapter ? `当前：第 ${state.chapterNo ?? '?'} 章「${state.chapter}」${state.batch ? ` · 第 ${state.batch}/${state.chapterBatches || '?'} 批` : ''}` : (state.message || '准备批次…')}
+      </div>
+      <div className="inventory-progress-meta">
+        已用 {fmt(Math.round(elapsedMs / 1000))}{active && etaSeconds !== null ? ` · 预计剩余 ${fmt(etaSeconds)}` : ''}
+        {state.resumed?.length ? ` · 续跑跳过 ${state.resumed.length} 章` : ''}
+        {state.entries ? ` · 已生成 ${state.entries} 条` : ''}
+      </div>
+      {state.lastError ? <div className="inventory-progress-error">最近失败：{state.lastError}</div> : null}
     </div>
   );
 }

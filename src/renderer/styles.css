@@ -14104,3 +14104,44 @@ button.a-dot-full:hover {
 .structure-warnings { color: var(--warning); max-height: 72px; overflow: auto; }
 .structure-file { color: var(--muted); word-break: break-all; }
 .structure-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------------- 知识清单按章生成进度 ---------------- */
+.inventory-progress {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 130;
+  width: min(360px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-elevated);
+  color: var(--text);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+}
+.inventory-progress.has-error { border-color: var(--danger); }
+.inventory-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+.inventory-progress-head span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.inventory-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+.inventory-progress-bar > div {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width .25s ease;
+}
+.inventory-progress-meta { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.inventory-progress-error { color: var(--danger); font-size: 12px; line-height: 1.5; word-break: break-word; }

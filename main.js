@@ -1895,6 +1895,8 @@ ipcMain.handle("subject:generateInventory", async (event, payload = {}) => {
     toPage,
     modules,
     keepExisting,
+    forceRerun,
+    concurrency,
   } = payload;
   const requestId = `subj_inv_${Date.now()}`;
   const startedAt = Date.now();
@@ -1912,6 +1914,8 @@ ipcMain.handle("subject:generateInventory", async (event, payload = {}) => {
       toPage,
       modules,
       keepExisting,
+      forceRerun,
+      concurrency,
       onProgress: (progress) => {
         if (!sender || sender.isDestroyed()) return;
         sender.send("subject:inventory:progress", { requestId, ...progress });
@@ -1924,6 +1928,9 @@ ipcMain.handle("subject:generateInventory", async (event, payload = {}) => {
       batches: result?.batches,
       truncated: result?.truncated,
       failed: result?.failedChapters?.length || 0,
+      resumed: result?.resumedChapters?.length || 0,
+      concurrency: result?.concurrency,
+      elapsedMs: result?.elapsedMs,
     });
     return { success: true, ...result };
   } catch (error) {

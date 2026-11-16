@@ -17,6 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const aiService = require('./ai/index.js');
 const subjectManager = require('./subjectManager.js');
 const chapterStructure = require('./chapterStructure.js');
@@ -26,6 +27,100 @@ const { repairGhostText } = require('./textRepair.js');
 const DEFAULT_BATCH_CHARS = 24000;
 const MAX_CONTINUATIONS = 3;
 const FIELD_MAX = 500;
+const CACHE_VERSION = 3;
+const RETRYABLE_RE = /(^|\D)(429|500|502|503|504)(\D|$)|rate.?limit|too many requests|overloaded|server error|bad gateway|service unavailable|gateway timeout|ECONNRESET|ETIMEDOUT|ECONNREFUSED|fetch failed|socket hang up|network|timed? out|timeout/i;
+
+function resolveConcurrency(settings, override) {
+  const raw = Number(override ?? settings?.inventoryConcurrency);
+  return Math.min(6, Math.max(1, Number.isFinite(raw) && raw > 0 ? raw : 2));
+}
+
+function resolveRetryOptions(settings) {
+  const max = Number(settings?.inventoryRetryMax);
+  const base = Number(settings?.inventoryRetryBaseMs);
+  return {
+    maxRetries: Number.isFinite(max) && max >= 0 ? Math.min(6, max) : 3,
+    baseMs: Number.isFinite(base) && base > 0 ? base : 700,
+  };
+}
+
+function isRetryableError(message) {
+  return RETRYABLE_RE.test(String(message || ''));
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('知识清单生成已取消'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('知识清单生成已取消'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
+function safeSourceKey(sourceKey) {
+  return String(sourceKey || 'primary').replace(/[^a-zA-Z0-9_-]+/g, '_');
+}
+
+/** 章节缓存：主教材落 教材/知识清单缓存.json，补充资料落 资料/转写/<id>.清单缓存.json */
+function chapterCachePath(subjectId, sourceKey) {
+  const dir = subjectManager.getSubjectDir(subjectId);
+  if (String(sourceKey || '').startsWith('material:')) {
+    return path.join(dir, '资料', '转写', `${safeSourceKey(sourceKey)}.清单缓存.json`);
+  }
+  return path.join(dir, '教材', '知识清单缓存.json');
+}
+
+function emptyChapterCache(sourceKey) {
+  return { version: CACHE_VERSION, sourceKey, status: 'empty', chapters: {} };
+}
+
+function loadChapterCache(subjectId, sourceKey) {
+  try {
+    const file = chapterCachePath(subjectId, sourceKey);
+    if (!fs.existsSync(file)) return { ...emptyChapterCache(sourceKey), file };
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Number(data?.version) !== CACHE_VERSION) return { ...emptyChapterCache(sourceKey), file };
+    return { ...emptyChapterCache(sourceKey), ...data, chapters: data.chapters || {}, file };
+  } catch (error) {
+    console.warn('[Inventory] 读取章节缓存失败，将重新生成:', error?.message || error);
+    return { ...emptyChapterCache(sourceKey), file: chapterCachePath(subjectId, sourceKey) };
+  }
+}
+
+function saveChapterCache(subjectId, sourceKey, data) {
+  const file = chapterCachePath(subjectId, sourceKey);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  const payload = {
+    ...data,
+    version: CACHE_VERSION,
+    sourceKey,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+  return file;
+}
+
+/** 章节内容 + 是否已学 + 提示词版本共同决定缓存是否可用 */
+function chapterHash(text, learned) {
+  return crypto
+    .createHash('sha1')
+    .update(`v${CACHE_VERSION}|${learned ? 'learned' : 'new'}|`)
+    .update(String(text || ''))
+    .digest('hex')
+    .slice(0, 16);
+}
+
 
 const INVENTORY_SYSTEM = `你是学习平台的教材知识清单整理器。你的唯一任务是：只依据用户给出的教材原文片段，拆出可检查的知识点条目。
 输出格式是 NDJSON：每行一个 JSON 对象，不要数组包裹、不要 Markdown、不要解释、不要编号。
@@ -236,6 +331,25 @@ async function requestBatchEntries({ system, user, settings, signal, maxTokens }
   return { entries, truncated, finishReason, continuations: chunks.length - 1 };
 }
 
+/** 429 / 5xx / 网络错误退避重试；重试信息通过 onRetry 同步给进度事件 */
+async function requestBatchWithRetry({ chapterTitle, batchNo, onRetry, signal, ...args }, retryOptions) {
+  const { maxRetries, baseMs } = retryOptions;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestBatchEntries({ ...args, signal });
+    } catch (error) {
+      if (signal?.aborted) throw new Error('知识清单生成已取消');
+      const message = error?.message || String(error);
+      const retryable = isRetryableError(message);
+      if (attempt >= maxRetries || !retryable) throw error;
+      const delay = Math.round(Math.min(8000, baseMs * 2 ** attempt) * (0.8 + Math.random() * 0.4));
+      console.warn(`[Inventory] ${chapterTitle} 第 ${batchNo} 批失败（${message}），${delay}ms 后重试 ${attempt + 1}/${maxRetries}`);
+      onRetry?.({ attempt: attempt + 1, maxRetries, delay, error: message });
+      await sleep(delay, signal);
+    }
+  }
+}
+
 function matchChapterToken(chapters, token) {
   const raw = String(token ?? '').trim();
   if (!raw) return null;
@@ -348,10 +462,13 @@ function renderChapterBlock(chapter, entries, learned) {
   return lines.join('\n\n');
 }
 
-function buildCoverageSection({ source, selected, chapterEntries = [], preservedNos, missingChapters, stats, warnings }) {
+function buildCoverageSection({ source, selected, chapterEntries = [], preservedNos, missingChapters, stats, warnings, resumed = [], skippedBatches = 0, concurrency = 1 }) {
   const lines = ['## 覆盖范围说明', ''];
   lines.push(`- 资料来源：${source.type === 'primary' ? '主教材' : '补充资料'}《${source.name}》${source.totalPages ? `，共 ${source.totalPages} 页` : ''}。`);
-  lines.push(`- 本次处理：${selected.length} 章 / ${stats.batches} 批；成功 ${stats.okChapters} 章，失败 ${stats.failedChapters.length} 章。`);
+  lines.push(`- 本次处理：${selected.length} 章 / ${stats.batches} 批；成功 ${stats.okChapters} 章，失败 ${stats.failedChapters.length} 章；并发 ${concurrency} 路。`);
+  if (resumed.length) {
+    lines.push(`- 续跑复用：${resumed.map((item) => item.title || item).join('、')}（缓存命中 ${skippedBatches} 批，未重新请求）。`);
+  }
   if (selected.length) {
     lines.push(`- 章节与页码：${selected.map((chapter) => `${chapter.title}（${chapter.fromPage ? `第 ${chapter.fromPage}–${chapter.toPage} 页` : '无页码'}）`).join('；')}。`);
   }
@@ -466,6 +583,8 @@ function applyModuleRanges(markdown, moduleList, existingChapters = []) {
  * @param {number} [options.toPage]
  * @param {Array<object>} [options.modules] 用户自定义知识模块
  * @param {boolean} [options.keepExisting=true]
+ * @param {boolean} [options.forceRerun=false] 忽略章节缓存，强制重跑
+ * @param {number} [options.concurrency] 并发批次数（默认 2，可用 settings.inventoryConcurrency 配置）
  */
 async function generateKnowledgeInventory({
   subjectId,
@@ -480,6 +599,8 @@ async function generateKnowledgeInventory({
   toPage = 0,
   modules = [],
   keepExisting = true,
+  forceRerun = false,
+  concurrency: concurrencyOverride = 0,
 } = {}) {
   const subject = subjectManager.getSubject(subjectId);
   if (!subject) throw new Error('科目不存在');
@@ -531,11 +652,28 @@ async function generateKnowledgeInventory({
       .map((chapter) => chapter.no),
   );
 
-  // 规划批次：先算清楚总批次数，进度才有意义
-  const plan = selected.map((chapter) => {
+  const concurrency = resolveConcurrency(settings, concurrencyOverride);
+  const retryOptions = resolveRetryOptions(settings);
+  const maxTokens = aiService.resolveMaxOutputTokens(settings);
+
+  // 规划批次：先算清楚总批次数；每章记录内容哈希，用于断点续跑
+  const plan = selected.map((chapter, chapterIndex) => {
     const text = chapterStructure.chapterText(readable, chapter);
+    const learned = learnedSet.has(chapter.no);
     const batches = splitChapterBatches(text, Number(settings?.inventoryBatchChars) || DEFAULT_BATCH_CHARS);
-    return { chapter, batches };
+    return {
+      chapterIndex,
+      chapter,
+      learned,
+      text,
+      hash: chapterHash(text, learned),
+      batches,
+      batchResults: new Array(batches.length),
+      cachedEntries: null,
+      finalEntries: null,
+      finalized: false,
+      error: null,
+    };
   });
   const totalBatches = plan.reduce((sum, item) => sum + item.batches.length, 0);
   if (!totalBatches) throw new Error('选中的章节里没有可处理的原文');
@@ -544,102 +682,281 @@ async function generateKnowledgeInventory({
   const existing = keepExisting ? findExistingNote(database, subjectId) : null;
   const existingBlocks = existing ? parseExistingBlocks(existing.content) : [];
 
-  const maxTokens = aiService.resolveMaxOutputTokens(settings);
+  const cacheData = loadChapterCache(subjectId, sourceInfo.key);
+  const resumedChapters = [];
+  let skippedBatches = 0;
+  if (!forceRerun) {
+    for (const item of plan) {
+      const cached = cacheData.chapters[String(item.chapter.no)];
+      if (cached && cached.hash === item.hash && Array.isArray(cached.entries) && cached.entries.length) {
+        item.cachedEntries = cached.entries;
+        skippedBatches += item.batches.length;
+        resumedChapters.push({
+          no: item.chapter.no,
+          title: item.chapter.title,
+          entries: cached.entries.length,
+          fromPage: item.chapter.fromPage,
+          toPage: item.chapter.toPage,
+        });
+      }
+    }
+  }
+
   const regenerated = new Map();
   const failedChapters = [];
   const truncatedBatches = [];
   const batchDetails = [];
   const stats = { batches: 0, entries: 0, okChapters: 0, failedChapters, truncatedBatches };
-  let doneBatches = 0;
+  let doneBatches = skippedBatches;
+  const runStartedAt = Date.now();
+  if (resumedChapters.length) {
+    console.info(`[Inventory] 续跑跳过 ${resumedChapters.length} 章（缓存命中）：${resumedChapters.map((item) => item.title).join('、')}`);
+  }
 
-  const report = (chapter, batchIndex) => {
+  const emitProgress = (stage, payload = {}) => {
     if (typeof onProgress !== 'function') return;
+    const elapsedMs = Date.now() - runStartedAt;
+    const executed = doneBatches - skippedBatches;
+    const etaMs = executed > 0
+      ? Math.max(0, Math.round((elapsedMs / executed) * (totalBatches - doneBatches)))
+      : null;
     try {
       onProgress({
-        stage: 'batch',
+        stage,
         subjectId,
-        chapter: chapter.title,
-        chapterNo: chapter.no,
-        batch: batchIndex,
-        batches: totalBatches,
+        elapsedMs,
+        etaMs,
         done: doneBatches,
         total: totalBatches,
-        entries: stats.entries,
+        skippedBatches,
+        resumedChapters: resumedChapters.map((item) => item.title),
+        concurrency,
+        ...payload,
       });
     } catch (error) {
       console.warn('[Inventory] 进度回调失败:', error?.message || error);
     }
   };
 
+  emitProgress('plan', {
+    chapters: selected.length,
+    readyBatches: totalBatches - skippedBatches,
+    resumedChapters,
+  });
+  for (const item of resumedChapters) {
+    emitProgress('chapter:skipped', {
+      chapter: item.title,
+      chapterNo: item.no,
+      fromPage: item.fromPage,
+      toPage: item.toPage,
+      entries: item.entries,
+      message: `续跑跳过「${item.title}」（缓存命中 ${item.entries} 条）`,
+    });
+  }
+
+  const persistChapterCache = (item) => {
+    if (!item.finalEntries) return;
+    cacheData.chapters[String(item.chapter.no)] = {
+      hash: item.hash,
+      title: item.chapter.title,
+      fromPage: item.chapter.fromPage,
+      toPage: item.chapter.toPage,
+      learned: item.learned,
+      entries: item.finalEntries,
+      updatedAt: new Date().toISOString(),
+    };
+    cacheData.status = 'partial';
+    try {
+      saveChapterCache(subjectId, sourceInfo.key, cacheData);
+    } catch (error) {
+      console.warn('[Inventory] 写入章节缓存失败（不影响本次生成）:', error?.message || error);
+    }
+  };
+
+  const finalizeChapter = (item) => {
+    if (item.finalized) return;
+    if (item.batchResults.some((result) => result === undefined)) return;
+    item.finalized = true;
+    const failures = item.batchResults.filter((result) => result?.error);
+    if (failures.length) {
+      item.error = item.batchResults
+        .map((result, index) => (result?.error ? `第 ${index + 1} 批：${result.error}` : ''))
+        .filter(Boolean)
+        .join('；');
+      return;
+    }
+    const entries = dedupeEntries(item.batchResults.flatMap((result) => result?.entries || []));
+    item.finalEntries = entries;
+    stats.entries += entries.length;
+    // 整章成功就立刻落盘，后续章节失败时重跑可直接复用
+    persistChapterCache(item);
+  };
+
+  const tasks = [];
   for (const item of plan) {
+    if (item.cachedEntries) continue;
+    item.batches.forEach((batch, batchIndex) => tasks.push({ item, batch, batchIndex }));
+  }
+
+  let taskCursor = 0;
+  const runTask = async ({ item, batch, batchIndex }) => {
     if (signal?.aborted) throw new Error('知识清单生成已取消');
-    const { chapter, batches } = item;
-    const entries = [];
-    let chapterFailed = null;
-    for (let index = 0; index < batches.length; index += 1) {
-      if (signal?.aborted) throw new Error('知识清单生成已取消');
-      const batch = batches[index];
-      try {
-        const result = await requestBatchEntries({
-          system: INVENTORY_SYSTEM,
-          user: buildBatchPrompt({
-            subjectName: subject.name,
-            sourceName: `${sourceInfo.name}${sourceInfo.type === 'primary' ? '（主教材）' : '（补充资料）'}`,
-            chapter,
-            batch,
-            learned: learnedSet.has(chapter.no),
-          }),
-          settings,
-          signal,
-          maxTokens,
-        });
-        entries.push(...result.entries);
-        stats.entries += result.entries.length;
-        batchDetails.push({
-          chapterNo: chapter.no,
-          chapter: chapter.title,
-          fromPage: batch.fromPage,
-          toPage: batch.toPage,
-          entries: result.entries.length,
-          truncated: result.truncated,
-        });
-        if (result.truncated) {
-          truncatedBatches.push({
-            chapter: chapter.title,
-            range: batch.fromPage && batch.toPage ? `第 ${batch.fromPage}–${batch.toPage} 页` : `第 ${index + 1} 批`,
+    const batchNo = batchIndex + 1;
+    const range = batch.fromPage && batch.toPage ? `第 ${batch.fromPage}–${batch.toPage} 页` : `第 ${batchNo} 批`;
+    emitProgress('batch:start', {
+      chapter: item.chapter.title,
+      chapterNo: item.chapter.no,
+      batch: batchNo,
+      chapterBatches: item.batches.length,
+      fromPage: batch.fromPage,
+      toPage: batch.toPage,
+      message: `第 ${item.chapter.no} 章「${item.chapter.title}」${range} 开始（并发 ${concurrency}）`,
+    });
+    let outcome;
+    try {
+      const result = await requestBatchWithRetry({
+        chapterTitle: item.chapter.title,
+        batchNo,
+        system: INVENTORY_SYSTEM,
+        user: buildBatchPrompt({
+          subjectName: subject.name,
+          sourceName: `${sourceInfo.name}${sourceInfo.type === 'primary' ? '（主教材）' : '（补充资料）'}`,
+          chapter: item.chapter,
+          batch,
+          learned: item.learned,
+        }),
+        settings,
+        signal,
+        maxTokens,
+        onRetry: (retry) => {
+          emitProgress('batch:retry', {
+            chapter: item.chapter.title,
+            chapterNo: item.chapter.no,
+            batch: batchNo,
+            attempt: retry.attempt,
+            maxRetries: retry.maxRetries,
+            delayMs: retry.delay,
+            error: retry.error,
+            message: `第 ${item.chapter.no} 章第 ${batchNo} 批遇到 ${retry.error}，${retry.delay}ms 后第 ${retry.attempt}/${retry.maxRetries} 次重试`,
           });
-        }
-      } catch (error) {
-        chapterFailed = error?.message || String(error);
+        },
+      }, retryOptions);
+      outcome = {
+        entries: result.entries,
+        truncated: result.truncated,
+        finishReason: result.finishReason,
+      };
+    } catch (error) {
+      if (signal?.aborted) throw new Error('知识清单生成已取消');
+      outcome = { entries: [], truncated: false, error: error?.message || String(error) };
+    }
+    item.batchResults[batchIndex] = outcome;
+    doneBatches += 1;
+    emitProgress(outcome.error ? 'batch:failed' : 'batch:done', {
+      chapter: item.chapter.title,
+      chapterNo: item.chapter.no,
+      batch: batchNo,
+      chapterBatches: item.batches.length,
+      fromPage: batch.fromPage,
+      toPage: batch.toPage,
+      entries: outcome.entries.length,
+      chapterEntries: (item.finalEntries || []).length,
+      truncated: Boolean(outcome.truncated),
+      error: outcome.error || '',
+      message: outcome.error
+        ? `第 ${item.chapter.no} 章「${item.chapter.title}」第 ${batchNo} 批失败：${outcome.error}`
+        : `第 ${item.chapter.no} 章「${item.chapter.title}」第 ${batchNo} 批完成（${outcome.entries.length} 条）`,
+    });
+    finalizeChapter(item);
+  };
+
+  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, tasks.length)) }, async () => {
+    while (!signal?.aborted) {
+      const index = taskCursor;
+      taskCursor += 1;
+      if (index >= tasks.length) return;
+      await runTask(tasks[index]);
+    }
+    throw new Error('知识清单生成已取消');
+  });
+  await Promise.all(workers);
+
+  // 按章节原始顺序汇总：并发完成顺序不影响条目顺序与编号
+  for (const item of plan) {
+    const { chapter } = item;
+    if (item.cachedEntries) {
+      stats.entries += item.cachedEntries.length;
+      regenerated.set(chapter.no, {
+        chapter,
+        block: renderChapterBlock(chapter, dedupeEntries(item.cachedEntries), item.learned),
+        entries: item.cachedEntries.length,
+        failed: null,
+        resumed: true,
+      });
+      item.batches.forEach((batch, batchIndex) => {
         batchDetails.push({
           chapterNo: chapter.no,
           chapter: chapter.title,
+          batch: batchIndex + 1,
           fromPage: batch.fromPage,
           toPage: batch.toPage,
           entries: 0,
+          resumed: true,
           truncated: false,
-          error: chapterFailed,
         });
-        console.warn(`[Inventory] ${chapter.title} 第 ${index + 1} 批失败:`, chapterFailed);
-      }
-      doneBatches += 1;
-      report(chapter, index + 1);
+      });
+      continue;
     }
-    if (chapterFailed) {
-      failedChapters.push({ chapter: chapter.title, error: chapterFailed });
+    item.batchResults.forEach((result, index) => {
+      const batch = item.batches[index];
+      const batchEntry = {
+        chapterNo: chapter.no,
+        chapter: chapter.title,
+        batch: index + 1,
+        fromPage: batch?.fromPage ?? null,
+        toPage: batch?.toPage ?? null,
+        entries: result?.entries?.length || 0,
+        truncated: Boolean(result?.truncated),
+        error: result?.error || undefined,
+      };
+      batchDetails.push(batchEntry);
+      if (result?.truncated) {
+        truncatedBatches.push({
+          chapter: chapter.title,
+          range: batch?.fromPage && batch?.toPage ? `第 ${batch.fromPage}–${batch.toPage} 页` : `第 ${index + 1} 批`,
+        });
+      }
+    });
+    if (item.error) {
+      failedChapters.push({
+        chapter: chapter.title,
+        chapterNo: chapter.no,
+        error: item.error,
+        batches: item.batchResults.map((result, index) => (result?.error ? index + 1 : null)).filter(Boolean),
+      });
     } else {
       stats.okChapters += 1;
     }
     regenerated.set(chapter.no, {
       chapter,
-      block: renderChapterBlock(chapter, dedupeEntries(entries), learnedSet.has(chapter.no)),
-      entries: entries.length,
-      failed: chapterFailed,
+      block: renderChapterBlock(chapter, item.finalEntries || [], item.learned),
+      entries: (item.finalEntries || []).length,
+      failed: item.error,
+      resumed: false,
     });
   }
 
+  stats.batches = totalBatches;
+  const elapsedMs = Date.now() - runStartedAt;
+  emitProgress('generated', {
+    okChapters: stats.okChapters,
+    failedChapters: failedChapters.length,
+    entries: stats.entries,
+    message: `已生成 ${stats.okChapters}/${selected.length} 章，${stats.entries} 条；耗时 ${(elapsedMs / 1000).toFixed(1)}s`,
+  });
+
   if (!regenerated.size) throw new Error('所有章节都生成失败，未写入知识清单');
-  if (!stats.okChapters) {
+  if (!stats.okChapters && !resumedChapters.length) {
     const detail = failedChapters.map((item) => `${item.chapter}：${item.error}`).join('；');
     throw new Error(`所有章节都生成失败，未写入知识清单（旧版保持不变）：${detail}`);
   }
@@ -704,6 +1021,9 @@ async function generateKnowledgeInventory({
     missingChapters,
     stats,
     warnings: structure.warnings,
+    resumed: resumedChapters,
+    skippedBatches,
+    concurrency,
   });
   const index = buildIndexSection(moduleBlocks);
   const rawContent = [header, ...moduleBlocks, coverage, index].filter(Boolean).join('\n\n');
@@ -736,9 +1056,35 @@ async function generateKnowledgeInventory({
   // 助教上下文与题库分类都能看到完整章节。
   subjectManager.saveSubject({ id: subject.id, knowledgeSummary: normalized.text });
 
+  // 清单位、知识点索引都已完整写入：此时才整理章节缓存。
+  // 只删除已不属于当前结构表的陈旧条目，保留本次用过的条目供下次同范围复用；
+  // 中途失败时不会走到这里，缓存保持 partial，可继续续跑。
+  try {
+    const validKeys = new Set(baseStructure.chapters.map((chapter) => String(chapter.no)));
+    for (const key of Object.keys(cacheData.chapters)) {
+      if (!validKeys.has(key)) delete cacheData.chapters[key];
+    }
+    cacheData.status = 'committed';
+    cacheData.lastCommitAt = new Date().toISOString();
+    saveChapterCache(subjectId, sourceInfo.key, cacheData);
+  } catch (error) {
+    console.warn('[Inventory] 整理章节缓存失败（不影响清单）:', error?.message || error);
+  }
+
+  emitProgress('done', {
+    okChapters: stats.okChapters,
+    failedChapters: failedChapters.length,
+    entries: stats.entries,
+    elapsedMs,
+    chars: normalized.text.length,
+    message: `知识清单已写入：${selected.length} 章 / ${totalBatches} 批，${normalized.text.length} 字，耗时 ${(elapsedMs / 1000).toFixed(1)}s`,
+  });
+
   return {
     noteId: note?.id || null,
     chars: normalized.text.length,
+    elapsedMs,
+    concurrency,
     source: {
       key: sourceInfo.key,
       type: sourceInfo.type,
@@ -756,6 +1102,7 @@ async function generateKnowledgeInventory({
       toPage: chapter.toPage,
       auto: Boolean(chapter.auto),
       entries: regenerated.get(chapter.no)?.entries || 0,
+      resumed: Boolean(regenerated.get(chapter.no)?.resumed),
     })),
     batches: totalBatches,
     batchDetails,
@@ -767,6 +1114,10 @@ async function generateKnowledgeInventory({
     truncated: truncatedBatches.length > 0,
     truncatedBatches,
     failedChapters,
+    resumedChapters,
+    skippedBatches,
+    forceRerun,
+    cacheFile: chapterCachePath(subjectId, sourceInfo.key),
     preservedChapters: [...new Set(preservedNos)],
     missingChapters: missingChapters.map((chapter) => ({ no: chapter.no, title: chapter.title })),
     snapshotPath: snapshotPath || null,

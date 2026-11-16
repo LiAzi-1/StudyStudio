@@ -81,12 +81,16 @@ async function generateInventory(action, ctx) {
     toPage: Number(action.toPage) || 0,
     modules: Array.isArray(action.modules) ? action.modules : [],
     keepExisting: action.keepExisting !== false,
+    forceRerun: action.forceRerun === true,
+    concurrency: Number(action.concurrency) || 0,
   });
   if (!result?.success) throw new Error(result?.error || '知识清单生成失败');
   const details = [
     `共 ${result.chars || 0} 字`,
     `${result.chapterCount || 0} 章 / ${result.batches || 0} 批`,
+    `并发 ${result.concurrency || 1}`,
   ];
+  if (result.resumedChapters?.length) details.push(`续跑跳过 ${result.resumedChapters.length} 章`);
   if (result.truncated) details.push('有批次被输出上限截断');
   if (result.failedChapters?.length) details.push(`${result.failedChapters.length} 章失败`);
   ctx.toast?.({ title: '知识清单已更新', message: details.join('，'), tone: result.truncated || result.failedChapters?.length ? 'warning' : 'success' });
