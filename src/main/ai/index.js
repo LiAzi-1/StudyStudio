@@ -360,8 +360,42 @@ function disableDeepSeekThinking(client) {
   };
 }
 
-function extractResponseText(response) {
+/**
+ * 读取服务端的结束原因。
+ * - chat.completions：choices[0].finish_reason（length 表示达到 max_tokens）
+ * - Responses：status / incomplete_details.reason
+ * - Anthropic：stop_reason（max_tokens 表示被截断）
+ */
+function extractFinishReason(response, type = 'openai') {
   if (!response) return '';
+  if (type === 'anthropic') return String(response.stop_reason || '');
+  const normalized = response?.response && typeof response.response === 'object' ? response.response : response;
+  const choice = normalized?.choices?.[0];
+  if (choice?.finish_reason) return String(choice.finish_reason);
+  if (normalized?.incomplete_details?.reason) return String(normalized.incomplete_details.reason);
+  if (normalized?.status) return String(normalized.status);
+  return '';
+}
+
+const TRUNCATED_FINISH_REASONS = new Set(['length', 'max_tokens', 'max_output_tokens', 'incomplete', 'max_output']);
+
+function isTruncatedFinish(reason) {
+  return TRUNCATED_FINISH_REASONS.has(String(reason || '').toLowerCase());
+}
+
+/**
+ * 输出预算：优先用设置里的显式值（inventoryMaxTokens / maxOutputTokens），
+ * 否则按服务商能力上限取默认值。知识清单等长文任务不再写死 8192。
+ */
+function resolveMaxOutputTokens(settings, fallback = 8192) {
+  const explicit = Number(settings?.inventoryMaxTokens ?? settings?.maxOutputTokens);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const provider = String(settings?.aiProvider || '').toLowerCase();
+  const caps = { deepseek: 8192, anthropic: 8192, openai: 16384 };
+  return caps[provider] || fallback;
+}
+
+function extractResponseText(response) {  if (!response) return '';
   const normalizedResponse = response?.response && typeof response.response === 'object'
     ? response.response
     : response;
@@ -532,7 +566,12 @@ function buildOpenAICompletionPayload(model, instructions, messages, maxOutputTo
   };
 }
 
-async function createOpenAITextResponse(client, model, apiFormat, { instructions = '', messages = [], maxOutputTokens = 4096, signal }) {
+async function createOpenAITextResponse(client, model, apiFormat, options) {
+  const detailed = await createOpenAITextResponseDetailed(client, model, apiFormat, options);
+  return detailed.text;
+}
+
+async function createOpenAITextResponseDetailed(client, model, apiFormat, { instructions = '', messages = [], maxOutputTokens = 4096, signal }) {
   const completionPayload = buildOpenAICompletionPayload(model, instructions, messages, maxOutputTokens);
 
   if (apiFormat === 'responses') {
@@ -544,22 +583,32 @@ async function createOpenAITextResponse(client, model, apiFormat, { instructions
     }, signal ? { signal } : undefined);
 
     const primaryText = extractResponseText(response);
-    if (primaryText.trim()) return primaryText;
+    if (primaryText.trim()) {
+      return { text: primaryText, finishReason: extractFinishReason(response, 'openai') };
+    }
 
     // 一些兼容网关对 Responses 成功返回但不带 output_text，自动回退到 chat.completions
     let fallbackError = null;
     try {
       const completionFallback = await client.chat.completions.create(completionPayload, signal ? { signal } : undefined);
       const fallbackText = extractResponseText(completionFallback);
-      if (fallbackText.trim()) return fallbackText;
+      if (fallbackText.trim()) {
+        return { text: fallbackText, finishReason: extractFinishReason(completionFallback, 'openai') };
+      }
     } catch (error) {
       fallbackError = error;
     }
-    return ensureModelText('', `（Responses 返回为空${fallbackError ? `，回退 chat.completions 也失败：${compactError(fallbackError)}` : ''}）`);
+    return {
+      text: ensureModelText('', `（Responses 返回为空${fallbackError ? `，回退 chat.completions 也失败：${compactError(fallbackError)}` : ''}）`),
+      finishReason: extractFinishReason(response, 'openai'),
+    };
   }
 
   const completion = await client.chat.completions.create(completionPayload, signal ? { signal } : undefined);
-  return ensureModelText(extractResponseText(completion), '（chat.completions）');
+  return {
+    text: ensureModelText(extractResponseText(completion), '（chat.completions）'),
+    finishReason: extractFinishReason(completion, 'openai'),
+  };
 }
 
 async function createOpenAITextResponseStream(client, model, apiFormat, { instructions = '', messages = [], maxOutputTokens = 4096, signal, onDelta }) {
@@ -2100,16 +2149,27 @@ async function complete(settings, { system = '', messages = [], maxTokens = 4096
           content: formatContentForProvider(message.content, 'messages'),
         })),
       }, signal ? { signal } : undefined);
-      return { success: true, content: extractClaudeText(response) };
+      const finishReason = extractFinishReason(response, 'anthropic');
+      return {
+        success: true,
+        content: extractClaudeText(response),
+        finishReason,
+        truncated: isTruncatedFinish(finishReason),
+      };
     }
 
-    const text = await createOpenAITextResponse(client, model, normalizedSettings.apiFormat, {
+    const detailed = await createOpenAITextResponseDetailed(client, model, normalizedSettings.apiFormat, {
       instructions: system,
       messages: chatMessages,
       maxOutputTokens: maxTokens,
       signal,
     });
-    return { success: true, content: text };
+    return {
+      success: true,
+      content: detailed.text,
+      finishReason: detailed.finishReason,
+      truncated: isTruncatedFinish(detailed.finishReason),
+    };
   } catch (error) {
     return { success: false, error: compactError(error) };
   }
@@ -2118,6 +2178,9 @@ async function complete(settings, { system = '', messages = [], maxTokens = 4096
 module.exports = {
   AI_ROLE_IDS,
   resolveRoleSettings,
+  resolveMaxOutputTokens,
+  extractFinishReason,
+  isTruncatedFinish,
   isVisionCapableSettings,
   assertVisionModel,
   formatContentForProvider,

@@ -1849,14 +1849,82 @@ ipcMain.handle("materials:pickPrimary", async () => {
   }
 });
 
-/** 生成知识清单：写进笔记库（subject_id 关联，Obsidian 同步）并更新科目档案 */
-ipcMain.handle("subject:generateInventory", async (event, { subjectId, settings } = {}) => {
+/** 章节结构表：读取（没有则现场识别并落盘） */
+ipcMain.handle("subject:chapterStructure", (event, { subjectId, source = "auto" } = {}) => {
+  try {
+    const chapterStructure = require("./src/main/chapterStructure.js");
+    const { structure, file, created } = chapterStructure.getStructure({ subjectId, source });
+    return { success: true, structure, file, created };
+  } catch (error) {
+    return { success: false, error: error?.message || "读取章节结构失败" };
+  }
+});
+
+/** 章节结构表：用户手动校正后保存 */
+ipcMain.handle("subject:saveChapterStructure", (event, { subjectId, source = "auto", chapters } = {}) => {
+  try {
+    const chapterStructure = require("./src/main/chapterStructure.js");
+    const { structure, file } = chapterStructure.saveStructure({ subjectId, source, chapters });
+    return { success: true, structure, file };
+  } catch (error) {
+    return { success: false, error: error?.message || "保存章节结构失败" };
+  }
+});
+
+/** 章节结构表：按原文重新识别（覆盖手工校正） */
+ipcMain.handle("subject:rebuildChapterStructure", (event, { subjectId, source = "auto" } = {}) => {
+  try {
+    const chapterStructure = require("./src/main/chapterStructure.js");
+    const { structure, file } = chapterStructure.rebuildStructure({ subjectId, source });
+    return { success: true, structure, file };
+  } catch (error) {
+    return { success: false, error: error?.message || "重新识别章节结构失败" };
+  }
+});
+
+/** 生成知识清单：按章分批，写进笔记库；支持起始章节 / 已学章节 / 补充资料来源 */
+ipcMain.handle("subject:generateInventory", async (event, payload = {}) => {
+  const {
+    subjectId,
+    settings,
+    source,
+    materialId,
+    startChapter,
+    learnedChapters,
+    fromPage,
+    toPage,
+    modules,
+    keepExisting,
+  } = payload;
   const requestId = `subj_inv_${Date.now()}`;
   const startedAt = Date.now();
-  console.info(`[Subjects][Inventory][${requestId}] start`, { subjectId });
+  const sender = event.sender;
+  console.info(`[Subjects][Inventory][${requestId}] start`, { subjectId, source, startChapter, fromPage, toPage });
   try {
-    const result = await subjectTextbook.generateKnowledgeInventory({ subjectId, settings });
-    console.info(`[Subjects][Inventory][${requestId}] done`, { ms: Date.now() - startedAt, chars: result?.chars });
+    const result = await subjectTextbook.generateKnowledgeInventory({
+      subjectId,
+      settings,
+      source,
+      materialId,
+      startChapter,
+      learnedChapters,
+      fromPage,
+      toPage,
+      modules,
+      keepExisting,
+      onProgress: (progress) => {
+        if (!sender || sender.isDestroyed()) return;
+        sender.send("subject:inventory:progress", { requestId, ...progress });
+      },
+    });
+    console.info(`[Subjects][Inventory][${requestId}] done`, {
+      ms: Date.now() - startedAt,
+      chars: result?.chars,
+      chapters: result?.chapterCount,
+      batches: result?.batches,
+      truncated: result?.truncated,
+      failed: result?.failedChapters?.length || 0,
+    });
     return { success: true, ...result };
   } catch (error) {
     console.warn(`[Subjects][Inventory][${requestId}] failed`, { error: error?.message || String(error) });

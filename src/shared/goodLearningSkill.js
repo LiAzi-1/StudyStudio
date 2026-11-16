@@ -184,7 +184,8 @@ function buildSubjectSkillBlock(subject, opts = {}) {
 
   const knowledgeSummary = subject.knowledgeSummary || subject.knowledge_summary || '';
   if (knowledgeSummary) {
-    lines.push(`知识清单概要：\n${String(knowledgeSummary).slice(0, 1200)}`);
+    // 完整清单正文：不再截前 1200 字，否则模型看不到后几章，改清单时只能重复前几章
+    lines.push(`知识清单（完整正文，修改时保持未涉及章节不变）：\n${String(knowledgeSummary)}`);
   }
 
   // 资料分层：主教材优先、补充资料辅助（AnythingLLM pinned document 的本地化实现）

@@ -66,12 +66,32 @@ async function writeNotes(action, ctx) {
 async function generateInventory(action, ctx) {
   const subjectId = action.subjectId || ctx.subjectId;
   if (!subjectId) throw new Error('当前对话没有绑定科目，无法生成知识清单');
-  ctx.toast?.({ title: '正在生成知识清单', message: '会分章节调用模型，可能需要几分钟', tone: 'info' });
-  const result = await window.openexam.subject.generateInventory({ subjectId, settings: ctx.settings });
+  const scopeText = action.startChapter
+    ? `从「${action.startChapter}」开始`
+    : (action.fromPage || action.toPage ? `第 ${action.fromPage || 1}–${action.toPage || '末'} 页` : '整科');
+  ctx.toast?.({ title: '正在按章生成知识清单', message: `${scopeText}，逐章分批调用模型，可能需要几分钟`, tone: 'info' });
+  const result = await window.openexam.subject.generateInventory({
+    subjectId,
+    settings: ctx.settings,
+    source: action.source || (action.materialId ? 'material' : 'auto'),
+    materialId: action.materialId || '',
+    startChapter: action.startChapter || '',
+    learnedChapters: Array.isArray(action.learnedChapters) ? action.learnedChapters : [],
+    fromPage: Number(action.fromPage) || 0,
+    toPage: Number(action.toPage) || 0,
+    modules: Array.isArray(action.modules) ? action.modules : [],
+    keepExisting: action.keepExisting !== false,
+  });
   if (!result?.success) throw new Error(result?.error || '知识清单生成失败');
-  ctx.toast?.({ title: '知识清单已更新', message: `共 ${result.chars || 0} 字`, tone: 'success' });
+  const details = [
+    `共 ${result.chars || 0} 字`,
+    `${result.chapterCount || 0} 章 / ${result.batches || 0} 批`,
+  ];
+  if (result.truncated) details.push('有批次被输出上限截断');
+  if (result.failedChapters?.length) details.push(`${result.failedChapters.length} 章失败`);
+  ctx.toast?.({ title: '知识清单已更新', message: details.join('，'), tone: result.truncated || result.failedChapters?.length ? 'warning' : 'success' });
   ctx.onNavigate?.('notes');
-  return `知识清单已写入笔记库（${result.chars || 0} 字）。`;
+  return `知识清单已写入笔记库（${result.chars || 0} 字，${result.chapterCount || 0} 章 / ${result.batches || 0} 批）${result.truncated ? '。注意：有批次被输出上限截断，结果可能不完整' : ''}。`;
 }
 
 async function textbookQuestions(action, ctx) {

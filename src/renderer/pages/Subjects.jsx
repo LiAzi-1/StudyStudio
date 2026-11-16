@@ -205,6 +205,8 @@ export default function Subjects({ onNavigate }) {
   const [editingId, setEditingId] = useState("");
   const [editName, setEditName] = useState("");
   const [dateDraft, setDateDraft] = useState({}); // { [id]: 'YYYY-MM-DD' | '' }
+  // 章节结构面板：{ subjectId, sourceKey, sourceName, totalPages, chapters, warnings, loading, saving, error, file }
+  const [structurePanel, setStructurePanel] = useState(null);
   const fileRef = useRef(null);
   const pipelineSubjectRef = useRef(null);
   const cancelRef = useRef(false);
@@ -767,6 +769,101 @@ export default function Subjects({ onNavigate }) {
 
   const goAsk = (subject) => onNavigate?.("ask-assistant", subject);
 
+  /** 打开章节结构面板：读取已有结构表，没有则现场识别并落盘 */
+  const openChapterStructure = async (subject) => {
+    setStructurePanel({
+      subjectId: subject.id,
+      sourceKey: "auto",
+      sourceName: subject.textbookName || subject.name,
+      totalPages: subject.textbookPages || 0,
+      chapters: [],
+      warnings: [],
+      file: "",
+      loading: true,
+      saving: false,
+      error: "",
+    });
+    try {
+      const result = await window.openexam.subject.chapterStructure({ subjectId: subject.id, source: "auto" });
+      if (!result?.success) throw new Error(result?.error || "读取章节结构失败");
+      setStructurePanel({
+        subjectId: subject.id,
+        sourceKey: result.structure?.source?.key || "primary",
+        sourceName: result.structure?.source?.name || subject.textbookName || subject.name,
+        totalPages: result.structure?.source?.totalPages || subject.textbookPages || 0,
+        chapters: (result.structure?.chapters || []).map((item) => ({ ...item })),
+        warnings: result.structure?.warnings || [],
+        file: result.file || "",
+        loading: false,
+        saving: false,
+        error: "",
+      });
+    } catch (error) {
+      setStructurePanel((prev) => ({ ...(prev || {}), loading: false, error: error?.message || String(error) }));
+    }
+  };
+
+  const updateStructureChapter = (index, field, value) => {
+    setStructurePanel((prev) => {
+      if (!prev) return prev;
+      const chapters = prev.chapters.map((item, itemIndex) => (itemIndex === index
+        ? { ...item, [field]: field === "title" ? value : (value === "" ? null : Number(value)) }
+        : item));
+      return { ...prev, chapters };
+    });
+  };
+
+  const saveChapterStructure = async () => {
+    if (!structurePanel) return;
+    setStructurePanel((prev) => ({ ...prev, saving: true, error: "" }));
+    try {
+      const result = await window.openexam.subject.saveChapterStructure({
+        subjectId: structurePanel.subjectId,
+        source: structurePanel.sourceKey,
+        chapters: structurePanel.chapters,
+      });
+      if (!result?.success) throw new Error(result?.error || "保存失败");
+      setStructurePanel((prev) => ({
+        ...prev,
+        chapters: (result.structure?.chapters || []).map((item) => ({ ...item })),
+        warnings: result.structure?.warnings || [],
+        file: result.file || prev.file,
+        saving: false,
+      }));
+      toast({ title: "章节结构已保存", message: "下次生成知识清单会按这张表取页", tone: "success" });
+    } catch (error) {
+      setStructurePanel((prev) => ({ ...prev, saving: false, error: error?.message || String(error) }));
+    }
+  };
+
+  const rebuildChapterStructure = async () => {
+    if (!structurePanel) return;
+    const ok = await confirm({
+      title: "按原文重新识别章节结构？",
+      message: "会覆盖你手动改过的页码和标题。",
+      confirmText: "重新识别",
+      tone: "warning",
+    });
+    if (!ok) return;
+    setStructurePanel((prev) => ({ ...prev, saving: true, error: "" }));
+    try {
+      const result = await window.openexam.subject.rebuildChapterStructure({
+        subjectId: structurePanel.subjectId,
+        source: structurePanel.sourceKey,
+      });
+      if (!result?.success) throw new Error(result?.error || "重新识别失败");
+      setStructurePanel((prev) => ({
+        ...prev,
+        chapters: (result.structure?.chapters || []).map((item) => ({ ...item })),
+        warnings: result.structure?.warnings || [],
+        file: result.file || prev.file,
+        saving: false,
+      }));
+    } catch (error) {
+      setStructurePanel((prev) => ({ ...prev, saving: false, error: error?.message || String(error) }));
+    }
+  };
+
   const elapsed = pipeline ? formatElapsed(clock - (pipeline.startedAt || clock)) : "";
 
   return (
@@ -941,6 +1038,9 @@ export default function Subjects({ onNavigate }) {
                     知识清单
                   </button>
                 ) : null}
+                <button type="button" className="subject-action" onClick={() => openChapterStructure(subject)} disabled={busy}>
+                  章节结构
+                </button>
                 <button type="button" className="subject-action danger" onClick={() => handleDelete(subject)} disabled={busy}>
                   删除
                 </button>
@@ -952,6 +1052,74 @@ export default function Subjects({ onNavigate }) {
           <div className="subject-empty">还没有科目。在上面输入名称创建一个；数学 / 英语 / 政治 / 专业课首次启动时会自动预置。</div>
         ) : null}
       </div>
+
+      {structurePanel ? (
+        <div className="structure-overlay" onClick={() => !structurePanel.saving && setStructurePanel(null)}>
+          <div className="structure-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="structure-dialog-head">
+              <div>
+                <strong>章节结构</strong>
+                <span>{structurePanel.sourceName}{structurePanel.totalPages ? ` · 共 ${structurePanel.totalPages} 页` : ""}</span>
+              </div>
+              <button type="button" className="subject-action" onClick={() => setStructurePanel(null)} disabled={structurePanel.saving}>
+                关闭
+              </button>
+            </div>
+            <p className="structure-hint">
+              知识清单会按这张表逐章取页。自动识别不完整或页码不对时，直接改下面的页码再保存；修改只在下次生成时生效。
+            </p>
+            {structurePanel.loading ? <div className="structure-loading">正在识别章节…</div> : null}
+            {structurePanel.error ? <div className="structure-error">{structurePanel.error}</div> : null}
+            {!structurePanel.loading ? (
+              <div className="structure-list">
+                {structurePanel.chapters.map((chapter, index) => (
+                  <div className="structure-row" key={`${chapter.no}-${index}`}>
+                    <span className={`structure-no ${chapter.auto ? "is-auto" : ""}`}>{chapter.auto ? "待核" : `第${chapter.no}章`}</span>
+                    <input
+                      className="subject-input structure-title"
+                      value={chapter.title || ""}
+                      onChange={(event) => updateStructureChapter(index, "title", event.target.value)}
+                      placeholder="章节标题"
+                    />
+                    <input
+                      className="subject-input structure-page"
+                      type="number"
+                      min="1"
+                      value={chapter.fromPage ?? ""}
+                      onChange={(event) => updateStructureChapter(index, "fromPage", event.target.value)}
+                      placeholder="起"
+                    />
+                    <span className="structure-dash">–</span>
+                    <input
+                      className="subject-input structure-page"
+                      type="number"
+                      min="1"
+                      value={chapter.toPage ?? ""}
+                      onChange={(event) => updateStructureChapter(index, "toPage", event.target.value)}
+                      placeholder="止"
+                    />
+                  </div>
+                ))}
+                {!structurePanel.chapters.length ? <div className="structure-loading">没有识别到章节，可点「重新识别」或先检查教材全文。</div> : null}
+              </div>
+            ) : null}
+            {structurePanel.warnings?.length ? (
+              <div className="structure-warnings">
+                {structurePanel.warnings.map((warning, index) => <div key={index}>· {warning}</div>)}
+              </div>
+            ) : null}
+            {structurePanel.file ? <div className="structure-file">已落盘：{structurePanel.file}</div> : null}
+            <div className="structure-dialog-actions">
+              <button type="button" className="subject-action" onClick={rebuildChapterStructure} disabled={structurePanel.loading || structurePanel.saving}>
+                重新识别
+              </button>
+              <button type="button" className="subject-action primary" onClick={saveChapterStructure} disabled={structurePanel.loading || structurePanel.saving}>
+                {structurePanel.saving ? "保存中…" : "保存章节结构"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

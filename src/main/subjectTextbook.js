@@ -13,8 +13,8 @@ const path = require('path');
 const aiService = require('./ai/index.js');
 const subjectManager = require('./subjectManager.js');
 const materialManager = require('./materialManager.js');
-const { GOOD_LEARNING_SKILL } = require('../shared/goodLearningSkill.js');
-const { MATH_STYLE_PROMPT, normalizeMath } = require('../shared/mathStyle.js');
+const knowledgeInventory = require('./knowledgeInventory.js');
+const { normalizeMath } = require('../shared/mathStyle.js');
 const { repairGhostText } = require('./textRepair.js');
 
 /** 教材文本疑似损坏（幽灵文字层 / Tofu）时，返回给用户的可执行提示 */
@@ -273,115 +273,16 @@ function resetTextbook(subjectId) {
 
 /* ------------------------------------------------------------------ 知识清单 */
 
-/** 知识清单生成提示词：skill 方法论 + 教材全文 */
-function buildInventoryPrompt(subject, textbookMarkdown) {
-  return `${GOOD_LEARNING_SKILL}
-
-# 任务
-
-你刚读完《${subject.name}》的教材转写全文。请严格按照上文的「知识清单（kind: knowledge）」规范，
-为这门科目生成**完整的知识清单**，直接输出 Markdown 正文（不要代码块包裹，不要开场白）：
-
-- 按教材章节组织成主题模块，模块内拆出可检查的知识点，每项带稳定编号（如 1.1、1.2、2.1）；
-- 每个知识点给出：核心概念与使用条件、典型任务或题型、必要前置、材料位置（第几章/第几节）、优先级（高/中/低）、当前状态（统一填「掌握待测」）；
-- 清单末尾给一节「覆盖范围说明」：列出教材覆盖的章节、转写中识别不清或缺失的部分（标「范围待核」）；
-- 再给一节「知识点编号索引」：一行一个「编号 - 知识点名」，方便后续计划和错题引用；
-- 如果科目是备考模式（考试日期 ${subject.examDate || '无'}），优先级按考查可能性排序；学习模式按教材逻辑顺序。
-
-# 数学公式规范（清单里出现公式时必须遵守）
-
-${MATH_STYLE_PROMPT}
-
-# 教材转写全文
-
-${textbookMarkdown}`;
-}
-
 /**
- * 生成知识清单：调用助教角色模型 → 写进笔记库（subject_id 关联，Obsidian 同步）
- * 同时把清单前 2000 字存进 subjects.knowledge_summary，供对话上下文引用。
+ * 生成 / 更新知识清单：按章节结构逐章分批交给 knowledgeInventory。
+ *
+ * 旧实现把教材截成「前 42,000 + 后 18,000 字符」一次性生成整篇 Markdown，
+ * 已在 knowledgeInventory 中替换为分章分批 + 代码汇总，这里只保留兼容入口。
  */
-async function generateKnowledgeInventory({ subjectId, settings, signal }) {
-  const subject = subjectManager.getSubject(subjectId);
-  if (!subject) throw new Error('科目不存在');
-
-  const dir = subjectManager.getSubjectDir(subjectId);
-  const textbookFile = path.join(dir, PAGE_DIR_NAME, '教材全文.md');
-  if (!fs.existsSync(textbookFile)) throw new Error('教材还没转写完成，先完成逐页转写');
-
-  const textbookMarkdown = fs.readFileSync(textbookFile, 'utf8');
-  if (textbookMarkdown.length < 200) throw new Error('教材转写内容太少，无法生成知识清单');
-
-  // 教材若带「幽灵文字层」（某异常字高频出现在每字之间），尝试整体剔除救回原文；
-  // 只有剔除后仍判定损坏（如 Tofu 缺失类、无法恢复）才报错，避免静默产出乱码清单
-  const inventoryRepair = repairGhostText(textbookMarkdown);
-  if (inventoryRepair.repaired) {
-    console.warn(`[subjectTextbook] 教材检测到幽灵文字层，已自动剔除乱码字符「${inventoryRepair.ghostChar}」共 ${inventoryRepair.removed} 处`);
-  }
-  if (inventoryRepair.quality.corrupt) {
-    throw new Error(corruptTextMessage(inventoryRepair.quality, 'inventory'));
-  }
-  const textbookMarkdownClean = inventoryRepair.text;
-
-  // 超长教材截断：保留开头与结尾（章节结构通常在开头，习题在结尾）
-  const LIMIT = 60000;
-  const trimmed = textbookMarkdownClean.length > LIMIT
-    ? `${textbookMarkdownClean.slice(0, LIMIT * 0.7)}\n\n<!-- 中间部分过长已截断 -->\n\n${textbookMarkdownClean.slice(-LIMIT * 0.3)}`
-    : textbookMarkdownClean;
-
-  const assistantSettings = aiService.resolveRoleSettings(settings, 'assistant');
-  // 兜底超时：超长教材偶尔会让模型迟迟不返回，卡住整条流水线
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5 * 60 * 1000);
-  let result;
-  try {
-    result = await aiService.complete(assistantSettings, {
-      system: `你是学习平台的 AI 助教，正在按 Good Learning 方法论为用户建立知识清单。只输出清单 Markdown 正文。笔记会自动同步到 Obsidian，数学公式必须用 $...$ / $$...$$ 的 MathJax LaTeX 书写。\n\n${MATH_STYLE_PROMPT}`,
-      messages: [{ role: 'user', content: buildInventoryPrompt(subject, trimmed) }],
-      maxTokens: 8192,
-      // 整理清单不需要思维链：关掉后长输出不会被推理 token 截断，也明显更快
-      fast: true,
-      signal: signal || controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!result?.success) throw new Error(result?.error || '知识清单生成失败');
-
-  const normalized = normalizeMath(String(result.content || '').trim());
-  if (normalized.warnings.length) {
-    console.warn('[Subjects] 知识清单公式格式提醒：', ...normalized.warnings.slice(0, 3));
-  }
-  const content = normalized.text;
-  if (content.length < 100) throw new Error('知识清单内容异常地短，请重试');
-
-  const summary = content
-    .split('\n')
-    .filter((line) => /^\s*(#{1,4}\s|[-*]\s)?\s*(\d+(\.\d+)*[.、\s])/.test(line) || /^#{1,3}\s/.test(line))
-    .slice(0, 60)
-    .join('\n');
-
-  subjectManager.saveSubject({
-    id: subject.id,
-    knowledgeSummary: summary || content.slice(0, 1500),
-  });
-
-  const note = require('./database.js').saveNote({
-    // 分批解析时反复生成清单：沿用上一次的笔记 id 原地更新，避免笔记库里堆一串同名清单
-    id: readParseMeta(subjectId).noteId || undefined,
-    title: `知识清单 · ${subject.name}`,
-    content,
-    tags: [subject.name, '知识清单'],
-    sourceType: 'subject',
-    sourceId: subject.id,
-    sourceLabel: '教材解析',
-    subjectId: subject.id,
-    meta: { kind: 'knowledge', subject: subject.name, generatedAt: new Date().toISOString() },
-  });
-
-  if (note?.id) writeParseMeta(subjectId, { noteId: note.id });
-
-  return { noteId: note?.id || null, chars: content.length };
+async function generateKnowledgeInventory(options = {}) {
+  const result = await knowledgeInventory.generateKnowledgeInventory(options);
+  if (result?.noteId) writeParseMeta(options.subjectId, { noteId: result.noteId });
+  return result;
 }
 
 /* ------------------------------------------------------------------ 题目提取 */

@@ -249,7 +249,16 @@ contextBridge.exposeInMainWorld("openexam", {
     failTextbook: (input) => ipcRenderer.invoke("subject:failTextbook", input),
     resetTextbook: (subjectId) => ipcRenderer.invoke("subject:resetTextbook", subjectId),
     generateInventory: (input) => ipcRenderer.invoke("subject:generateInventory", input),
+    chapterStructure: (input) => ipcRenderer.invoke("subject:chapterStructure", input),
+    saveChapterStructure: (input) => ipcRenderer.invoke("subject:saveChapterStructure", input),
+    rebuildChapterStructure: (input) => ipcRenderer.invoke("subject:rebuildChapterStructure", input),
     generateQuestions: (input) => ipcRenderer.invoke("subject:generateQuestions", input),
+    onInventoryProgress: (handler) => {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("subject:inventory:progress", listener);
+      return () => ipcRenderer.removeListener("subject:inventory:progress", listener);
+    },
     onQuestionsProgress: (handler) => {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);

@@ -14036,3 +14036,71 @@ button.a-dot-full:hover {
   font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
 }
 
+
+/* ---------------- 章节结构面板（知识清单按章生成） ---------------- */
+.structure-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(16, 20, 30, 0.45);
+  backdrop-filter: blur(2px);
+}
+.structure-dialog {
+  width: min(880px, 100%);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--surface-elevated);
+  color: var(--text);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22);
+}
+.structure-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.structure-dialog-head strong { display: block; font-size: 16px; }
+.structure-dialog-head span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.structure-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.structure-list {
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.structure-row { display: flex; align-items: center; gap: 8px; }
+.structure-no {
+  flex: 0 0 62px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-border-soft);
+  border-radius: 6px;
+  padding: 4px 0;
+}
+.structure-no.is-auto { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-border); }
+.structure-title { flex: 1; min-width: 200px; }
+.structure-page { width: 82px; flex: 0 0 82px; text-align: center; }
+.structure-dash { color: var(--muted); }
+.structure-loading, .structure-error, .structure-file, .structure-warnings { font-size: 12px; line-height: 1.6; }
+.structure-loading { color: var(--muted); padding: 12px 0; }
+.structure-error { color: var(--danger); }
+.structure-warnings { color: var(--warning); max-height: 72px; overflow: auto; }
+.structure-file { color: var(--muted); word-break: break-all; }
+.structure-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
