@@ -28,7 +28,15 @@ function formatRemaining(ms) {
  * 打开即起临时局域网服务，界面显示二维码与可访问地址；
  * 图片到达后回调给会话输入区，关闭弹窗 / 超时 / 退出应用时服务立即停止，不常驻。
  */
-export default function PhoneUploadDialog({ onClose, onImages, onNotice }) {
+export default function PhoneUploadDialog({
+  onClose,
+  onImages,
+  onNotice,
+  title = '手机传图',
+  subtitle = '扫码拍照，图片直接进入当前会话',
+  mobileTitle = '传图给 AI 助教',
+  mobileLead = '',
+}) {
   const { toast } = useDialog();
   const [info, setInfo] = useState(null);
   const [error, setError] = useState(null);
@@ -47,7 +55,10 @@ export default function PhoneUploadDialog({ onClose, onImages, onNotice }) {
     setError(null);
     setStatus('starting');
     try {
-      const result = await window.openexam.phoneUpload.start();
+      const result = await window.openexam.phoneUpload.start({
+        title: mobileTitle,
+        lead: mobileLead || undefined,
+      });
       if (!result?.success) {
         setError({ error: result?.error || '启动手机传图失败', hint: result?.hint || '', code: result?.code || '' });
         setStatus('error');
@@ -145,8 +156,8 @@ export default function PhoneUploadDialog({ onClose, onImages, onNotice }) {
     >
       <div style={{ width: 'min(460px, 100%)', maxHeight: '88vh', overflow: 'auto', ...CARD, background: 'var(--surface-elevated)', padding: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <strong style={{ fontSize: 14 }}>手机传图</strong>
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>扫码拍照，图片直接进入当前会话</span>
+          <strong style={{ fontSize: 14 }}>{title}</strong>
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>{subtitle}</span>
           <button type="button" onClick={onClose} style={{ marginLeft: 'auto', border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: 16 }}>×</button>
         </div>
 

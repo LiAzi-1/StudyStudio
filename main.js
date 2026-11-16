@@ -15,6 +15,7 @@ const obsidianSync = require("./src/main/obsidian/index.js");
 const runtimeEnv = require("./src/main/runtimeEnv.js");
 const subjectClassify = require("./src/main/subjectClassify.js");
 const { validateCitations } = require("./src/main/materialContext.js");
+const parseProcesses = require("./src/main/parseProcesses.js");
 const { parseKnowledgeSummaryTaxonomy, MODULE_LABELS } = require("./src/shared/knowledgeTaxonomy");
 const { formatAIResult } = require("./src/shared/textbookFormat.js");
 
@@ -86,7 +87,21 @@ app.whenReady().then(() => {
   questionAssets.registerProtocol();
 
   // 初始化数据库
-  database.initDatabase();
+  // 失败时不能让 whenReady 链静默 reject：那样窗口永远不会创建，进程却一直挂着，
+  // 用户看到的就是「应用打不开」。
+  try {
+    database.initDatabase();
+  } catch (error) {
+    console.error("[DB] 初始化失败:", error);
+    dialog.showErrorBox(
+      "StudyStudio 无法启动",
+      `本地数据库打不开：${error?.message || error}\n\n`
+      + "如果后台还有 StudyStudio 进程没退出，请先在任务管理器里结束它再重试；"
+      + "仍然失败时，可以把数据目录下的 openexam.db-wal、openexam.db-shm 改名或删除后再打开。"
+    );
+    app.quit();
+    return;
+  }
 
   // WP-07 本地自动备份：启动先检查当天是否已备份，运行中每小时再检查一次（同一天不会重复）
   const runAutoBackup = () => databaseBackup.maybeAutoBackup(database.getDatabase())
@@ -143,6 +158,11 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+}).catch((error) => {
+  // 启动阶段任何未捕获异常都不能让应用「静默不显示」：记录日志并给出可见提示
+  console.error("[App] 启动失败:", error);
+  dialog.showErrorBox("StudyStudio 启动失败", String(error?.stack || error?.message || error));
+  app.quit();
 });
 
 // IPC 处理器 - 数据库操作
@@ -156,6 +176,40 @@ ipcMain.handle("db:getQuestions", (event, paperId, limit) => {
 
 ipcMain.handle("db:getQuestionsByIds", (event, ids) => {
   return database.getQuestionsByIds(ids || []);
+});
+
+// 题目补答案：文字答案与图片答案分开走，图片先落盘再写引用
+ipcMain.handle("question:updateAnswer", (event, input = {}) => {
+  return database.updateQuestionAnswer(input.questionId, input);
+});
+
+ipcMain.handle("question:addAnswerImage", (event, input = {}) => {
+  const questionId = String(input.questionId || "").trim();
+  if (!questionId) return { success: false, error: "题目 ID 不能为空" };
+  const saved = questionAssets.saveAnswerImage({ questionId, dataUrl: input.dataUrl });
+  if (!saved.success) return saved;
+  try {
+    const question = database.addQuestionAnswerImage(questionId, saved.url);
+    return { ...saved, question };
+  } catch (error) {
+    // 写库失败时把刚落的文件删掉，避免留下无人引用的图片
+    try { questionAssets.removeAnswerImage(saved.url); } catch { /* ignore */ }
+    return { success: false, error: error?.message || "保存答案图片失败" };
+  }
+});
+
+ipcMain.handle("question:removeAnswerImage", (event, input = {}) => {
+  const questionId = String(input.questionId || "").trim();
+  const url = String(input.url || "").trim();
+  if (!questionId || !url) return { success: false, error: "题目 ID 和图片地址不能为空" };
+  const removed = questionAssets.removeAnswerImage(url);
+  if (!removed.success && removed.error === "不是有效的答案图片地址") return removed;
+  try {
+    const question = database.removeQuestionAnswerImage(questionId, url);
+    return { success: true, question, fileRemoved: Boolean(removed.success) };
+  } catch (error) {
+    return { success: false, error: error?.message || "删除答案图片失败" };
+  }
 });
 
 ipcMain.handle("db:savePracticeRecord", (event, record) => {
@@ -1347,6 +1401,8 @@ ipcMain.handle("phoneUpload:start", async (event, options = {}) => {
     return await phoneUpload.start({
       ttlMs: options.ttlMs,
       idleMs: options.idleMs,
+      title: options.title,
+      lead: options.lead,
       onEvent: (payload) => {
         if (sender && !sender.isDestroyed()) sender.send("phoneUpload:event", payload);
       },
@@ -1664,7 +1720,8 @@ ipcMain.handle("materials:parse", async (event, { subjectId, id } = {}) => {
     if (!["pdf", "pptx"].includes(item.kind)) {
       return { success: false, error: "该格式暂不支持自动转写" };
     }
-    if (item.status === "ready") return { success: true, already: true, chars: item.chars };
+    // 已解析完成且页数齐全的直接复用；有缺页时允许重新解析补齐
+    if (item.status === "ready" && !(item.missingPages || []).length) return { success: true, already: true, chars: item.chars };
 
     // PDF 入队前先确认解析环境；缺项直接返回可操作提示，不用等任务失败
     if (item.kind === "pdf") {
@@ -1767,6 +1824,16 @@ ipcMain.handle("materials:uploadPrimary", async (event, { subjectId, pdfPath, fi
   }).catch(markFailed);
 });
 
+/** 停止主教材解析：杀掉该科目的 MinerU 子进程，保留已落盘的批次供下次续传 */
+ipcMain.handle("materials:cancelPrimary", async (event, subjectId) => {
+  try {
+    const cancelled = require("./src/main/textbookMineru.js").cancelTextbook(subjectId);
+    return { success: true, cancelled };
+  } catch (error) {
+    return { success: false, error: error?.message || "停止解析失败" };
+  }
+});
+
 /** 系统文件对话框选主教材 PDF */
 ipcMain.handle("materials:pickPrimary", async () => {
   try {
@@ -1798,7 +1865,7 @@ ipcMain.handle("subject:generateInventory", async (event, { subjectId, settings 
 });
 
 /** 教材例题习题提取进题库（逐块进行，进度推给渲染层） */
-ipcMain.handle("subject:generateQuestions", async (event, { subjectId, settings, requestId, pages, title, paperId } = {}) => {
+ipcMain.handle("subject:generateQuestions", async (event, { subjectId, settings, requestId, pages, title, paperId, source, materialIds } = {}) => {
   const { controller } = getRecognitionController(requestId);
   const sender = event.sender;
   const send = (payload) => {
@@ -1814,6 +1881,9 @@ ipcMain.handle("subject:generateQuestions", async (event, { subjectId, settings,
       pages: pages || null,
       title: title || "",
       paperId: paperId || null,
+      // 来源：有主教材时主进程会优先主教材；没有主教材时可用 materialIds 限定补充资料
+      source: source || "auto",
+      materialIds: Array.isArray(materialIds) ? materialIds : [],
     });
     send({ stage: "done", ...result });
     return { success: true, ...result };
@@ -1857,5 +1927,7 @@ app.on("window-all-closed", () => {
 // 从 Dock 重新激活窗口时还要继续用同一个连接
 app.on("will-quit", () => {
   phoneUpload.stop("quit");
+  // 解析中途退出：结束仍在跑的 MinerU 提取器，避免留下孤儿进程
+  try { parseProcesses.killAll(); } catch (error) { console.warn("[Parse] 结束解析子进程失败:", error?.message || error); }
   database.closeDatabase();
 });

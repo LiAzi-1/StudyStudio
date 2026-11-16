@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import RichQuestionContent from '../components/RichQuestionContent.jsx';
 import SubjectiveGrader from '../components/SubjectiveGrader.jsx';
+import QuestionAnswerPanel from '../components/QuestionAnswerPanel.jsx';
 import { useDialog } from '../components/DialogProvider.jsx';
 import { getState } from '../store/examStore.js';
+import { hasQuestionAnswer, isAnswerSupplemented } from '../utils/questionAnswer.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const CAT_NAMES = {
@@ -120,13 +122,21 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
     setTimeElapsed(0);
     setCurrentIndex(0);
     setShowAnalysis(isBrowseMode && !isMockMode);
+    let loadedQuestions = [];
     if (propQuestions?.length > 0) {
+      loadedQuestions = propQuestions;
       setQuestions(propQuestions);
       setPaper({ title: config?.title || `${CAT_NAMES[config?.category] || '专项'}练习`, type: 'practice', duration: durationMinutes });
     } else if (paperId) {
       const state = getState();
-      setQuestions(state.currentQuestions || []);
+      loadedQuestions = state.currentQuestions || [];
+      setQuestions(loadedQuestions);
       setPaper(state.currentPaper);
+    }
+    // 从题库「缺答案」入口进来时，直接定位到第一道没有答案的题
+    if (config?.startAtMissing) {
+      const firstMissing = loadedQuestions.findIndex((item) => !hasQuestionAnswer(item));
+      if (firstMissing >= 0) setCurrentIndex(firstMissing);
     }
   }, [paperId, propQuestions, config, durationMinutes, isMemorizeMode, isMockMode, isReviewMode]);
 
@@ -141,6 +151,12 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
   }, [isMockMode, durationMinutes, resumeRecord]);
 
   const currentQuestion = questions[currentIndex];
+
+  // 补答案后把最新题目回写到当前列表，答题卡/答案区立即更新
+  const handleQuestionUpdated = (updated) => {
+    if (!updated?.id) return;
+    setQuestions((prev) => prev.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+  };
 
   useEffect(() => {
     if (!currentQuestion) return;
@@ -567,11 +583,13 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
               }
             </span>
           ) : null}
-          <div style={{ fontSize: 12, color: 'var(--text)', fontWeight: 500, display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 4 }}>
-            <span className="tb-label">{isSubjective ? '【参考答案】' : '【答案】'}</span>
-            <RichQuestionContent
-              value={formatAnswerForDisplay(currentQuestion.answer, currentQuestion.type) || '暂无，建议让 AI 老师批改'}
-              className="tb-inline tb-answer-text"
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <QuestionAnswerPanel
+              question={currentQuestion}
+              onUpdated={handleQuestionUpdated}
+              editable
+              compact
+              label={isSubjective ? '【参考答案】' : '【答案】'}
             />
           </div>
         </div>
@@ -738,9 +756,13 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
                       {qs.map(q => {
                         const isAnsweredFlag = isAnswered(answers[q.id], q.type);
                         const isCurrent  = q._idx === currentIndex;
+                        const missingAnswer = !hasQuestionAnswer(q);
+                        const supplemented = isAnswerSupplemented(q) && !missingAnswer;
+                        const stateLabel = missingAnswer ? ' · 缺答案' : supplemented ? ' · 答案已补充' : '';
                         return (
-                          <button key={q.id} onClick={() => goToQ(q._idx)} title={`第 ${q._idx + 1} 题`}
+                          <button key={q.id} onClick={() => goToQ(q._idx)} title={`第 ${q._idx + 1} 题${stateLabel}`}
                             style={{
+                              position: 'relative',
                               aspectRatio: '1/1', borderRadius: 6, fontSize: 11, fontWeight: 600,
                               display: 'flex', alignItems: 'center', justifyContent: 'center',
                               cursor: 'pointer', transition: 'all 0.15s',
@@ -757,6 +779,11 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
                               }),
                             }}>
                             {q._idx + 1}
+                            {missingAnswer ? (
+                              <span style={{ position: 'absolute', top: 2, right: 2, width: 6, height: 6, borderRadius: 3, background: 'var(--warning, #d97706)' }} />
+                            ) : supplemented ? (
+                              <span style={{ position: 'absolute', top: 2, right: 2, width: 6, height: 6, borderRadius: 3, background: 'var(--success, #059669)' }} />
+                            ) : null}
                           </button>
                         );
                       })}
@@ -768,22 +795,35 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
           </div>
 
           {/* Legend */}
-          {!isReviewMode && (
-          <div style={{ padding: '10px 16px', borderTop: '1px solid var(--line)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {[
-              { label: '未答', border: '1px solid var(--line)', bg: 'var(--surface)' },
-              { label: '已答', border: '1px solid var(--accent-border-soft)', bg: 'var(--accent-soft-bg)' },
-              { label: '当前', border: '2px solid var(--accent)', bg: 'var(--accent)' },
-            ].concat(questions.some(q => isSubjectiveType(q.type))
-              ? [{ label: '主观题（纸面）', border: '1px dashed var(--line)', bg: 'var(--surface)' }]
-              : []).map(l => (
-              <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ width: 9, height: 9, borderRadius: 2, border: l.border, background: l.bg, flexShrink: 0 }} />
-                <span style={{ fontSize: 10, color: 'var(--muted)' }}>{l.label}</span>
+          {(() => {
+            const legend = isReviewMode
+              ? []
+              : [
+                  { label: '未答', border: '1px solid var(--line)', bg: 'var(--surface)' },
+                  { label: '已答', border: '1px solid var(--accent-border-soft)', bg: 'var(--accent-soft-bg)' },
+                  { label: '当前', border: '2px solid var(--accent)', bg: 'var(--accent)' },
+                ];
+            if (!isReviewMode && questions.some(q => isSubjectiveType(q.type))) {
+              legend.push({ label: '主观题（纸面）', border: '1px dashed var(--line)', bg: 'var(--surface)' });
+            }
+            if (questions.some(q => !hasQuestionAnswer(q))) {
+              legend.push({ label: '缺答案', dot: 'var(--warning, #d97706)' });
+            }
+            if (questions.some(q => isAnswerSupplemented(q) && hasQuestionAnswer(q))) {
+              legend.push({ label: '答案已补充', dot: 'var(--success, #059669)' });
+            }
+            if (!legend.length) return null;
+            return (
+              <div style={{ padding: '10px 16px', borderTop: '1px solid var(--line)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {legend.map(l => (
+                  <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ width: 9, height: 9, borderRadius: l.dot ? 5 : 2, border: l.border, background: l.dot || l.bg, flexShrink: 0 }} />
+                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>{l.label}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          )}
+            );
+          })()}
         </aside>
 
         {/* ── RIGHT: MAIN AREA ── */}
@@ -818,6 +858,16 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
                 <span style={{ fontSize: 10, color: 'var(--muted)', padding: '2px 7px', borderRadius: 5, background: 'var(--neutral-soft-bg)' }}>
                   {isSubjectiveType(currentQuestion.type) ? '主观题' : ({ single: '单选题', multiple: '多选题', judge: '判断题', fill: '填空题' }[currentQuestion.type] || '题目')}
                 </span>
+                {!hasQuestionAnswer(currentQuestion) ? (
+                  <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--warning, #b45309)', padding: '2px 8px', borderRadius: 999, background: 'var(--warning-soft, #fef3c7)' }}>
+                    缺答案
+                  </span>
+                ) : null}
+                {isAnswerSupplemented(currentQuestion) && hasQuestionAnswer(currentQuestion) ? (
+                  <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--success, #047857)', padding: '2px 8px', borderRadius: 999, background: 'var(--success-soft, #d1fae5)' }}>
+                    答案已补充
+                  </span>
+                ) : null}
                 {/* Difficulty dots if available */}
                 {currentQuestion.difficulty && (
                   <div style={{ marginLeft: 'auto', display: 'flex', gap: 3, alignItems: 'center' }}>

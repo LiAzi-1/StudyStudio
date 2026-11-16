@@ -471,7 +471,7 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, o
       <div className="practice-summary">
         <div className="summary-item">
           <span className="summary-value">{totalCount.toLocaleString()}</span>
-          <span className="summary-label">题库共多少题</span>
+          <span className="summary-label">题库总题量</span>
         </div>
         <div className="summary-actions">
           <button className="summary-btn outline" onClick={openConfig}>

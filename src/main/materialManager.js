@@ -90,16 +90,42 @@ function writeIndex(subjectId, next) {
   return payload;
 }
 
+/** 按转写文件里的 `<!-- 第 N 页 -->` 标记核对覆盖率；兼容旧清单（旧数据只有 PDF 总页数） */
+function withCoverage(subjectId, item, hasText) {
+  if (!hasText || !item.pages) return { ...item, hasText };
+  // 只有 PDF 转写带 `<!-- 第 N 页 -->` 页标记；PPTX/文本不按页统计
+  if (item.kind !== 'pdf') return { ...item, hasText, totalPages: item.totalPages || item.pages, missingPages: item.missingPages || [] };
+  if (Array.isArray(item.missingPages)) {
+    return { ...item, hasText, totalPages: item.totalPages || item.pages };
+  }
+  try {
+    const markdown = fs.readFileSync(path.join(subjectManager.getSubjectDir(subjectId), item.textPath), 'utf8');
+    const converted = new Set(
+      [...markdown.matchAll(/<!--\s*第\s*(\d+)\s*页/g)].map((match) => Number(match[1])),
+    );
+    // 老格式转写可能根本没有页标记，无法核对覆盖率，不做缺页判定
+    if (!converted.size) return { ...item, hasText };
+    const totalPages = Number(item.pages) || converted.size;
+    const missingPages = [];
+    for (let no = 1; no <= totalPages; no += 1) {
+      if (!converted.has(no)) missingPages.push(no);
+    }
+    return { ...item, hasText, pages: converted.size, totalPages, missingPages };
+  } catch {
+    return { ...item, hasText };
+  }
+}
+
 function listMaterials(subjectId) {
   const index = readIndex(subjectId);
   return {
     ...index,
     primary: primaryView(subjectId),
-    supplementary: index.supplementary.map((item) => ({
-      ...item,
+    supplementary: index.supplementary.map((item) => {
       // 转写文件可能已被手工删除，实时反映
-      hasText: Boolean(item.textPath) && fs.existsSync(path.join(subjectManager.getSubjectDir(subjectId), item.textPath)),
-    })),
+      const hasText = Boolean(item.textPath) && fs.existsSync(path.join(subjectManager.getSubjectDir(subjectId), item.textPath));
+      return withCoverage(subjectId, item, hasText);
+    }),
   };
 }
 
@@ -182,14 +208,18 @@ function patchSupplementary(subjectId, id, patch = {}) {
 }
 
 /** 解析完成后写入可读正文 */
-function finishSupplementary({ subjectId, id, markdown, pages = 0 } = {}) {
+function finishSupplementary({ subjectId, id, markdown, pages = 0, totalPages = pages, missingPages = [] } = {}) {
   const dir = materialDir(subjectId);
   const rel = path.join(MATERIAL_DIR, TEXT_DIR, `${id}.md`);
   const text = String(markdown || '').trim();
   if (!text) throw new Error('没有可保存的转写内容');
   fs.writeFileSync(path.join(dir, TEXT_DIR, `${id}.md`), text, 'utf8');
   return patchSupplementary(subjectId, id, {
-    status: 'ready', textPath: rel, chars: text.length, pages, error: null,
+    status: 'ready', textPath: rel, chars: text.length, pages,
+    // 覆盖率：pages 是实际转出正文的页数，totalPages 是 PDF 总页数
+    totalPages: Number(totalPages) || pages,
+    missingPages: Array.isArray(missingPages) ? missingPages : [],
+    error: null,
   });
 }
 
@@ -234,7 +264,11 @@ function describeForSkill(subjectId) {
   if (data.supplementary.length) {
     lines.push(`- **补充资料（辅助）**：共 ${data.supplementary.length} 份，${ready.length} 份可读。`);
     ready.slice(0, 12).forEach((item, i) => {
-      lines.push(`  ${i + 1}. 《${item.name}》· 可读正文 \`${item.textPath}\`（${item.chars} 字）`);
+      const missing = Array.isArray(item.missingPages) ? item.missingPages : [];
+      const coverage = missing.length
+        ? `，${item.pages}/${item.totalPages || item.pages} 页，未转出：第 ${missing.slice(0, 8).join('、')}${missing.length > 8 ? '…' : ''} 页（可提示用户重新解析补齐）`
+        : (item.totalPages ? `，${item.pages}/${item.totalPages} 页` : '');
+      lines.push(`  ${i + 1}. 《${item.name}》· 可读正文 \`${item.textPath}\`（${item.chars} 字${coverage}）`);
     });
     if (pending.length) lines.push(`  - 另有 ${pending.length} 份尚未完成解析，暂不可引用。`);
   } else {

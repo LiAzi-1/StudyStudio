@@ -390,6 +390,34 @@ export default function AIConfigPanel({
         </p>
       </div>
 
+      <div style={{
+        padding: '12px 14px', borderRadius: 12, border: '1px solid var(--accent-border, var(--line))',
+        background: 'var(--accent-soft-bg)', fontSize: 12, lineHeight: 1.75, color: 'var(--text)',
+        display: 'flex', flexDirection: 'column', gap: 8,
+      }}>
+        <div>
+          <strong>第一次配置？</strong>
+          推荐先用 <strong>DeepSeek</strong>（文本讲题、出卷便宜）配「通用 / 老师」；识图角色再单独选 <strong>通义千问 qwen-vl</strong> 这类能读图的模型。
+          去对应开放平台注册并创建 API Key，粘贴到下面的「API Key」即可；Base URL 和模型名保持默认，不需要改。
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => window.openexam?.app?.openExternal?.('https://platform.deepseek.com/api_keys')}
+            style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+          >
+            去 DeepSeek 申请 Key
+          </button>
+          <button
+            type="button"
+            onClick={() => window.openexam?.app?.openExternal?.('https://bailian.console.aliyun.com/?tab=model#/api-key')}
+            style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+          >
+            去通义千问申请 Key
+          </button>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {tabs.map((item) => {
           const active = tab === item.id;

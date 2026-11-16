@@ -76,19 +76,30 @@ async function generateInventory(action, ctx) {
 
 async function textbookQuestions(action, ctx) {
   const subjectId = action.subjectId || ctx.subjectId;
-  if (!subjectId) throw new Error('当前对话没有绑定科目，无法从教材导入题目');
-  ctx.toast?.({ title: '正在从教材提取题目', message: '会逐段识别例题与习题，可能需要几分钟', tone: 'info' });
+  if (!subjectId) throw new Error('当前对话没有绑定科目，无法从资料导入题目');
+  ctx.toast?.({ title: '正在从资料提取题目', message: '有主教材时用教材，否则逐份扫描补充资料；可能需要几分钟', tone: 'info' });
   const result = await window.openexam.subject.generateQuestions({
     subjectId,
     settings: ctx.settings,
     pages: action.pages || undefined,
     title: action.title || undefined,
     paperId: action.paperId || undefined,
+    source: action.source || 'auto',
+    materialIds: Array.isArray(action.materialIds) ? action.materialIds : undefined,
   });
   if (!result?.success) throw new Error(result?.error || result?.note || '题目提取失败');
   const count = Number(result.questions) || 0;
   if (count) ctx.onNavigate?.('papers');
-  return count ? `已从教材导入 ${count} 道题到题库。` : `没有新增题目：${result.note || '未识别到新题'}。`;
+  const messages = [];
+  messages.push(count ? `已从资料导入 ${count} 道题到题库。` : `没有新增题目：${result.note || '未识别到新题'}。`);
+  if (count && result.pendingClassification) {
+    messages.push(result.classificationNote || '未上传主教材：题目已入库，暂未按知识图谱分类。');
+  }
+  const missing = Array.isArray(result.missingPages) ? result.missingPages : [];
+  if (missing.length) {
+    messages.push(`注意：${missing.slice(0, 6).join('、')}${missing.length > 6 ? ' 等页' : ''}未转出文字，相关题目可能缺失。`);
+  }
+  return messages.join('');
 }
 
 async function classifyQuestions(action, ctx) {
@@ -208,7 +219,7 @@ const ACTION_LABELS = {
   adjust_plan: '调整学习计划',
   write_notes: '写入笔记',
   generate_inventory: '生成知识清单',
-  import_textbook_questions: '从教材导入题目',
+  import_textbook_questions: '从资料导入题目',
   update_subject_profile: '存档学习基础',
   add_subject: '创建科目',
   classify_questions: '按知识图谱分类',
@@ -229,7 +240,7 @@ function describeAction(action) {
   } else if (action.type === 'add_subject') {
     detail = action.name || '';
   } else if (action.type === 'import_textbook_questions') {
-    detail = action.title || (action.pages ? `第 ${action.pages} 页` : '教材例题习题');
+    detail = action.title || (action.pages ? `第 ${action.pages} 页` : '资料例题习题');
   } else if (action.type === 'generate_inventory' || action.type === 'classify_questions') {
     detail = '需要几分钟';
   } else if (action.type === 'update_subject_profile') {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import RichQuestionContent from '../components/RichQuestionContent.jsx';
 import SubjectiveGrader from '../components/SubjectiveGrader.jsx';
+import QuestionAnswerPanel from '../components/QuestionAnswerPanel.jsx';
 import { getState } from '../store/examStore.js';
 import { useAchievementUnlock } from '../components/AchievementUnlockCeremony.jsx';
 import { normalizeAchievements } from '../utils/achievementUtils.js';
@@ -105,7 +106,13 @@ export default function ExamResult({ result, onBack, onRedoWrong, onPracticeWeak
     setCurrentIndex(Math.max(0, Math.min(index, total - 1)));
   };
 
-  const questions = result?.questions || getState().currentQuestions || [];
+  const [questionPatches, setQuestionPatches] = useState({});
+  const baseQuestions = result?.questions || getState().currentQuestions || [];
+  const questions = baseQuestions.map((q) => (questionPatches[q.id] ? { ...q, ...questionPatches[q.id] } : q));
+  const handleQuestionUpdated = (updated) => {
+    if (!updated?.id) return;
+    setQuestionPatches((prev) => ({ ...prev, [updated.id]: { ...(prev[updated.id] || {}), ...updated } }));
+  };
   const questionTypeMap = new Map(questions.map((q) => [q.id, q.type]));
   const normalizeAnswers = (input) => Object.entries(input || {}).reduce((acc, [questionId, value]) => {
     const qType = questionTypeMap.get(questionId) || 'single';
@@ -341,7 +348,6 @@ export default function ExamResult({ result, onBack, onRedoWrong, onPracticeWeak
     const autoState = autoStateOf(currentQuestion);
     const currentState = stateOf(currentQuestion);
     const userAnswerText = formatAnswer(userAnswer, currentQuestion.type);
-    const correctAnswerText = formatAnswer(currentQuestion.answer, currentQuestion.type);
     const selectedKeys = currentQuestion.type === 'multiple' ? toMultipleKeys(userAnswer) : [userAnswer].filter(Boolean);
     const correctKeys = currentQuestion.type === 'multiple' ? toMultipleKeys(currentQuestion.answer) : [currentQuestion.answer].filter(Boolean);
     const typeLabel = isSubjective
@@ -420,10 +426,14 @@ export default function ExamResult({ result, onBack, onRedoWrong, onPracticeWeak
                   </span>
                 )}
               </div>
-              <div className={`review-answer-body${correctAnswerText ? '' : ' empty'}`}>
-                {correctAnswerText
-                  ? <RichQuestionContent value={correctAnswerText} className="tb-inline" />
-                  : '这道题暂无标准答案，可以拍照让 AI 批改。'}
+              <div className="review-answer-body">
+                <QuestionAnswerPanel
+                  question={currentQuestion}
+                  onUpdated={handleQuestionUpdated}
+                  editable
+                  compact
+                  showLabel={false}
+                />
               </div>
             </div>
 

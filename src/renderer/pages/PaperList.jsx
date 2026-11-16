@@ -254,6 +254,7 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
         {paginatedPapers.map(paper => {
           const badge = getPaperBadge(paper);
           const hasResumeRecord = Boolean(resumableMap[paper.id]);
+          const missingAnswerCount = Number(paper.missing_answer_count) || 0;
           return (
           <div key={paper.id} className="paper-card">
             <div className="paper-card-header">
@@ -269,6 +270,25 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
               <span className="paper-difficulty">
                 {'★'.repeat(paper.difficulty || 3)}{'☆'.repeat(5 - (paper.difficulty || 3))}
               </span>
+              {missingAnswerCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => onReviewPaper?.(paper, { startAtMissing: true })}
+                  title="打开看题，并直接跳到第一道没有答案的题"
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    border: '1px solid var(--warning-border, var(--accent-border-soft))',
+                    background: 'var(--warning-soft, var(--accent-soft-bg))',
+                    color: 'var(--warning, var(--accent))',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: onReviewPaper ? 'pointer' : 'default',
+                  }}
+                >
+                  {missingAnswerCount} 题缺答案 · 去补
+                </button>
+              ) : null}
             </div>
             <div className="paper-actions">
               {onReviewPaper && (

@@ -30,6 +30,7 @@ const PROGRESS_PHASES = [
   { min: 90, max: 99, text: "质量检查与收尾" },
 ];
 const LONG_WAIT_MS = 20000;
+const CONFIG_DRAFT_KEY = "openexam_ai_generate_config_v1";
 
 function getPhaseLabel(progress) {
   const current = PROGRESS_PHASES.find((phase) => progress >= phase.min && progress < phase.max);
@@ -88,21 +89,30 @@ function getGeneratedTitle(config = {}) {
   return `${trackLabel} · ${focusLabel} · ${modeLabel} · ${difficultyLabel}`;
 }
 
-export default function AIGenerate({ onOpenPaper }) {
-  const [config, setConfig] = useState({
-    track: "kaoyan",
-    focus: "standard",
-    customFocusName: "",
-    mode: "single",
-    category: "math",
-    mixedCategories: [...DEFAULT_MIXED_CATEGORIES],
-    analysisMode: "brief",
-    includeCurrentAffairs: false,
-    currentAffairsDays: 30,
-    currentAffairsKeywords: "",
-    difficulty: 3,
-    count: 10,
-    customPrompt: "",
+export default function AIGenerate({ onOpenPaper, onOpenSettings }) {
+  const [config, setConfig] = useState(() => {
+    const defaults = {
+      track: "kaoyan",
+      focus: "standard",
+      customFocusName: "",
+      mode: "single",
+      category: "math",
+      mixedCategories: [...DEFAULT_MIXED_CATEGORIES],
+      analysisMode: "brief",
+      includeCurrentAffairs: false,
+      currentAffairsDays: 30,
+      currentAffairsKeywords: "",
+      difficulty: 3,
+      count: 10,
+      customPrompt: "",
+    };
+    // 去设置配置 AI 后回到本页，保留已经选好的出卷参数
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(CONFIG_DRAFT_KEY) || "null");
+      return saved && typeof saved === "object" ? { ...defaults, ...saved } : defaults;
+    } catch {
+      return defaults;
+    }
   });
   const [generating, setGenerating] = useState(false);
   const [generated, setGenerated] = useState(null);
@@ -159,6 +169,10 @@ export default function AIGenerate({ onOpenPaper }) {
   }, []);
 
   useEffect(() => {
+    try { sessionStorage.setItem(CONFIG_DRAFT_KEY, JSON.stringify(config)); } catch { /* 存不下只影响草稿 */ }
+  }, [config]);
+
+  useEffect(() => {
     if (generated?.title) {
       setSaveTitle(generated.title);
     }
@@ -177,7 +191,7 @@ export default function AIGenerate({ onOpenPaper }) {
       return;
     }
     if (!isRoleConfigured("teacher") || !window.openexam?.ai) {
-      const msg = "请先在「设置」中配置 AI 服务。";
+      const msg = "请先点右上角「去配置 AI」配置模型和 API Key。";
       setError(msg);
       pushFeedback("error", msg);
       showToast({ title: "缺少 AI 配置", message: msg, tone: "warning" });
@@ -470,10 +484,19 @@ export default function AIGenerate({ onOpenPaper }) {
           </div>
           <h2 style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.3px", margin: 0 }}>AI 智能出卷</h2>
           {!isRoleConfigured("teacher") && (
-            <span style={{ fontSize: 11, color: "var(--warning)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", background: "var(--warning-soft)", borderRadius: 20 }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              AI 未配置
-            </span>
+            <div style={{ fontSize: 11, color: "var(--warning)", marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", background: "var(--warning-soft)", borderRadius: 20 }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                AI 未配置
+              </span>
+              <button
+                type="button"
+                onClick={() => onOpenSettings?.()}
+                style={{ padding: "5px 11px", borderRadius: 8, border: "1px solid var(--warning-border)", background: "var(--surface)", color: "var(--warning)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >
+                去配置 AI
+              </button>
+            </div>
           )}
         </div>
       </header>

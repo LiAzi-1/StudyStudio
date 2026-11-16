@@ -46,12 +46,68 @@ function resolveUnifiedRoute(settings, hasImages) {
   };
 }
 
+/* ------------------------------------------------------------ 输出范围判定 */
+
+const SUMMARY_VERB = '(总结|归纳|梳理)';
+const SUMMARY_OBJECT = '(知识点|考点|要点|概念|公式|结论|笔记)';
+// 用户明确点名要的其它产出：出现这些词就不算「只要知识点总结」
+const EXTRA_REQUEST_RE = /(拓展|延伸|扩展|补充|建议|规划|计划|例题|习题|练习|刷题|真题|推荐|书单|鼓励|下一步|学习安排)/;
+// 「不要拓展 / 不要建议」是在限制范围，先把这些否定句摘掉再判定
+const NEGATED_EXTRA_RE = /(不要|不用|不需要|无需|别|勿|不必)[^。；\n]{0,8}(拓展|延伸|扩展|补充|建议|规划|计划|例题|习题|练习|推荐|鼓励|下一步)/g;
+
+/**
+ * 判断这一轮用户是否只要「知识点总结」。
+ * 只做轻量意图判定，不改变其它意图（讲解 / 整理 / 提问）的输出方式。
+ */
+function wantsKnowledgeSummaryOnly(text) {
+  const source = String(text || '').trim();
+  if (!source) return false;
+
+  const cleaned = source.replace(NEGATED_EXTRA_RE, '');
+  // 「只要 / 仅需…总结」「总结…知识点」「知识点总结」三种说法都算总结意图
+  const explicit = new RegExp(`(只|仅|只需要|仅需|只要|只做|仅做|只给|仅给|只输出|只写|只整理)[^。；\\n]{0,16}${SUMMARY_VERB}`).test(cleaned);
+  const named = new RegExp(`${SUMMARY_VERB}[^。；\\n]{0,24}${SUMMARY_OBJECT}`).test(cleaned);
+  const noun = new RegExp(`${SUMMARY_OBJECT}(的)?${SUMMARY_VERB}`).test(cleaned);
+  if (!explicit && !named && !noun) return false;
+
+  // 同时还要例题 / 建议 / 计划时属于复合意图，按正常回答处理
+  return !EXTRA_REQUEST_RE.test(cleaned);
+}
+
+/** 只要知识点总结时追加的硬约束：放在 system 末尾，优先级高于方法论里的扩写要求 */
+const SUMMARY_ONLY_SCOPE_PROMPT = `## 本轮输出范围（最高优先级，覆盖上面的方法论与格式要求）
+用户这一轮只要「知识点总结」。
+- 只输出该知识点本身：定义与适用条件、关键性质或公式、必要的使用要点。结构清晰，可以直接落进笔记。
+- 不追加拓展、延伸阅读、背景故事、相关知识点、例题或练习、学习建议、下一步安排、鼓励或寒暄。
+- 不要为了显得完整而补充用户没问的内容；资料没覆盖的部分直接不写，不要用推测填充。
+- 如果本轮调用 write_notes，笔记正文同样只写上述范围，不要写成一节课、学习计划或知识清单。
+- 这一条优先于 Good Learning 方法论中关于每日学习、完整例题、举一反三和收尾建议的要求。`;
+
+function userMessageText(message) {
+  const raw = message?.content ?? message?.text;
+  if (typeof raw === 'string') return raw;
+  if (!Array.isArray(raw)) return '';
+  return raw
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      return typeof part?.text === 'string' ? part.text : '';
+    })
+    .join('\n');
+}
+
 function buildSystem({ database, subjectId, messages, questionContext }) {
   const context = assistantAgent.buildContextSnapshot(database);
   const subjectBlock = buildSubjectBlock(subjectId, { messages });
   let system = assistantAgent.buildSystemPrompt(context, subjectBlock.text);
   if (questionContext) {
     system += `\n\n## 本次会话锁定的题目\n用户正在追问下面这道题。讲解与动作都要围绕它，不要把上下文丢掉；如果用户换了新题，以新题为准。\n\n${buildQuestionContextPrompt(questionContext)}`;
+  }
+
+  const lastUser = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((message) => message?.role === 'user' || message?.type === 'user');
+  if (wantsKnowledgeSummaryOnly(userMessageText(lastUser))) {
+    system += `\n\n${SUMMARY_ONLY_SCOPE_PROMPT}`;
   }
   return { system, citations: subjectBlock.citations || [] };
 }
@@ -288,6 +344,7 @@ async function chatStream({ settings, database, messages, images, subjectId, que
 
 module.exports = {
   resolveUnifiedRoute,
+  wantsKnowledgeSummaryOnly,
   buildSystem,
   buildMessages,
   chat,

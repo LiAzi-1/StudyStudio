@@ -87,6 +87,8 @@ export default function Today({
   onStartReview,
   onStartDailyPractice,
   onOpenDailyReview,
+  onOpenImport,
+  onOpenMaterials,
 }) {
   const dialog = useDialog();
   const [daily, setDaily] = useState(null);
@@ -142,6 +144,8 @@ export default function Today({
   const dailyTotal = Number(dailySet?.totalCount) || dailySet?.questionIds?.length || 0;
   const dailyAnswered = countAnswered(dailyRecord?.answers);
   const dailyDone = dailySet?.status === "done";
+  // 题库为空时，默认待办里的练习动作都会落到「暂无题目」；统一改成先去导入
+  const bankEmpty = !dailySet && dailySubjects.length === 0;
   const dailyAwaitingReview = String(dailyRecord?.status || "").toLowerCase() === "awaiting_review";
   const effectiveDailyCategory = dailyCategory || dailySubjects[0]?.category || "";
 
@@ -228,7 +232,11 @@ export default function Today({
         <div>
           <div className="today-date">{formatDate(daily?.date || "")}</div>
           <h1 className="today-title">
-            {greeting}，今天还有 <em>{Math.max(0, summary.active - summary.done)}</em> 件事
+            {bankEmpty ? (
+              <>{greeting}，先导入一份试卷，今天的练习才跑得动</>
+            ) : (
+              <>{greeting}，今天还有 <em>{Math.max(0, summary.active - summary.done)}</em> 件事</>
+            )}
           </h1>
         </div>
         <div className="today-head-right">
@@ -245,15 +253,17 @@ export default function Today({
         </div>
       </header>
 
-      <div className="today-progress">
-        <div className="today-progress-bar">
-          <div className="today-progress-fill" style={{ width: `${summary.percent}%` }} />
+      {!bankEmpty && (
+        <div className="today-progress">
+          <div className="today-progress-bar">
+            <div className="today-progress-fill" style={{ width: `${summary.percent}%` }} />
+          </div>
+          <span className="today-progress-text">
+            {summary.done} / {summary.active}
+            {summary.allDone && <em className="today-progress-done">今天全清了</em>}
+          </span>
         </div>
-        <span className="today-progress-text">
-          {summary.done} / {summary.active}
-          {summary.allDone && <em className="today-progress-done">今天全清了</em>}
-        </span>
-      </div>
+      )}
 
       <section className="today-quick">
         <article className="today-quick-card">
@@ -343,10 +353,28 @@ export default function Today({
               </button>
             </>
           ) : (
-            <p className="today-quick-empty">题库里还没有可练习的题目，先去导入试卷或题目。</p>
+            <>
+              <p className="today-quick-empty">题库里还没有可练习的题目，先导入一份试卷（也可以上传教材后再让 AI 出题）。</p>
+              <button type="button" className="today-quick-btn" onClick={() => onOpenImport?.()}>
+                导入第一份试卷
+              </button>
+            </>
           )}
         </article>
       </section>
+
+      {bankEmpty && (
+        <section className="today-start-card">
+          <div>
+            <strong>先把题库填起来</strong>
+            <p>导入试卷或上传教材后，每日一练和下面的练习待办会自动可用。</p>
+          </div>
+          <div className="today-start-actions">
+            <button type="button" className="today-quick-btn" onClick={() => onOpenImport?.()}>导入试卷</button>
+            <button type="button" className="today-start-secondary" onClick={() => onOpenMaterials?.()}>上传教材</button>
+          </div>
+        </section>
+      )}
 
       {overdue.length > 0 && (
         <div className="today-overdue">
@@ -360,6 +388,7 @@ export default function Today({
           const meta = KIND_META[item.kind] || KIND_META.custom;
           const done = item.status === "done";
           const hasTarget = item.target?.unit !== "once" && Number(item.target?.value) > 0;
+          const needsImport = bankEmpty && ["vocab", "essay", "drill"].includes(item.kind);
           return (
             <li key={item.id} className={`today-item${done ? " is-done" : ""}`}>
               <button
@@ -389,8 +418,12 @@ export default function Today({
 
               <div className="today-item-actions">
                 {!done && (
-                  <button type="button" className="today-go" onClick={() => handleAction(item)}>
-                    {meta.action}
+                  <button
+                    type="button"
+                    className="today-go"
+                    onClick={() => (needsImport ? onOpenImport?.() : handleAction(item))}
+                  >
+                    {needsImport ? "去导入" : meta.action}
                   </button>
                 )}
                 <button type="button" className="today-remove" onClick={() => removeItem(item)} aria-label="删除">

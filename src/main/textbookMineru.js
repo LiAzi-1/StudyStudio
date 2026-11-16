@@ -21,6 +21,10 @@ const subjectTextbook = require('./subjectTextbook.js');
 const textbookFigures = require('./textbookFigures.js');
 const mineruServer = require('./mineruServer.js');
 const runtimeEnv = require('./runtimeEnv.js');
+const parseProcesses = require('./parseProcesses.js');
+
+// 记录每个科目正在跑的解析子进程，供渲染层「停止解析」使用
+const activeChildren = new Map();
 
 /**
  * 4.x 提取器脚本路径。
@@ -204,7 +208,7 @@ async function parseTextbookLocal({ subjectId, pdfPath, fileName, onProgress, ba
 
   function runExtractor() {
     return new Promise((resolve, reject) => {
-    const child = spawn(py.command, [
+    const child = parseProcesses.track(spawn(py.command, [
       script,
       safePdf,
       '--out-dir', outDir,
@@ -216,7 +220,8 @@ async function parseTextbookLocal({ subjectId, pdfPath, fileName, onProgress, ba
     ], {
       env: runtimeEnv.parsingEnv({ tier }),
       windowsHide: true,
-    });
+    }));
+    activeChildren.set(String(subjectId), child);
 
     let stderr = '';
     let buffered = '';
@@ -270,8 +275,16 @@ async function parseTextbookLocal({ subjectId, pdfPath, fileName, onProgress, ba
       }
     });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', (error) => reject(new Error(`启动 Python 提取器失败：${error.message}`)));
+    child.on('error', (error) => {
+      if (activeChildren.get(String(subjectId)) === child) activeChildren.delete(String(subjectId));
+      reject(new Error(`启动 Python 提取器失败：${error.message}`));
+    });
     child.on('close', (code) => {
+      if (activeChildren.get(String(subjectId)) === child) activeChildren.delete(String(subjectId));
+      if (child.__ssCancelled) {
+        reject(new Error('已取消解析'));
+        return;
+      }
       if (code !== 0 || failed) {
         let detail = stderr.split('\n').filter(Boolean).slice(-3).join(' | ') || '无输出';
         try {
@@ -362,4 +375,17 @@ async function detectMineru() {
   return { ...env, ...env.python, available: env.ready, reason: env.message, engine: 'mineru4' };
 }
 
-module.exports = { detectMineru, parseTextbookLocal, mineru4ExtractScript, requireReadyEnv };
+function cancelTextbook(subjectId) {
+  const key = String(subjectId);
+  const child = activeChildren.get(key);
+  if (!child) return false;
+  try {
+    child.__ssCancelled = true;
+    child.kill();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { detectMineru, parseTextbookLocal, cancelTextbook, mineru4ExtractScript, requireReadyEnv };

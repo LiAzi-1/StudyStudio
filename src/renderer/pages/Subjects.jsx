@@ -815,7 +815,7 @@ export default function Subjects({ onNavigate }) {
         <div className="subject-create-row">
           <input
             className="subject-input"
-            placeholder="第一步：输入科目名称，如 高等数学（上）、英语四级"
+            placeholder="新建科目（可选）：如 高等数学（上）、英语四级"
             value={newName}
             maxLength={40}
             onChange={(event) => setNewName(event.target.value)}

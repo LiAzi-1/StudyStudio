@@ -75,6 +75,13 @@ contextBridge.exposeInMainWorld("openexam", {
     clearAllData: () => ipcRenderer.invoke("db:clearAllData"),
   },
 
+  // 题目答案：文字/图片补充（图片落盘到 question-assets，只在库里存引用）
+  question: {
+    updateAnswer: (input = {}) => ipcRenderer.invoke("question:updateAnswer", input),
+    addAnswerImage: (input = {}) => ipcRenderer.invoke("question:addAnswerImage", input),
+    removeAnswerImage: (input = {}) => ipcRenderer.invoke("question:removeAnswerImage", input),
+  },
+
   // 今日复习队列（错题阶梯到期）
   review: {
     getTodayQueue: () => ipcRenderer.invoke("review:getTodayQueue"),
@@ -276,6 +283,7 @@ contextBridge.exposeInMainWorld("openexam", {
     remove: (input) => ipcRenderer.invoke("materials:remove", input),
     parse: (input) => ipcRenderer.invoke("materials:parse", input),
     uploadPrimary: (input) => ipcRenderer.invoke("materials:uploadPrimary", input),
+    cancelPrimary: (subjectId) => ipcRenderer.invoke("materials:cancelPrimary", subjectId),
     onChanged: (handler) => {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);

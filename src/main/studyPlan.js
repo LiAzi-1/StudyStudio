@@ -48,7 +48,8 @@ const DEFAULT_TEMPLATES = [
   {
     title: '英语词汇积累',
     kind: 'vocab',
-    config: { source: 'xuanci' },
+    // 考研英语按 category=english 入库；旧值 source=xuanci 是行测「言语理解·选词填空」的遗留配置
+    config: { category: 'english', subCategory: 'all' },
     target: { unit: 'count', value: 15 },
     sort: 10,
   },

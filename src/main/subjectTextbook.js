@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const aiService = require('./ai/index.js');
 const subjectManager = require('./subjectManager.js');
+const materialManager = require('./materialManager.js');
 const { GOOD_LEARNING_SKILL } = require('../shared/goodLearningSkill.js');
 const { MATH_STYLE_PROMPT, normalizeMath } = require('../shared/mathStyle.js');
 const { repairGhostText } = require('./textRepair.js');
@@ -232,12 +233,25 @@ function saveTranscription({ subjectId, pages, fileName, totalPages } = {}) {
   return { pages: list.length, chars: markdown.length };
 }
 
+/**
+ * 解析失败原因里可能带 MinerU 服务日志尾部（关键 traceback 在最后几行），
+ * 不能直接截到 300 字符。超长时保留开头结论 + 结尾日志，中间省略。
+ */
+function compactErrorText(reason, max = 6000) {
+  const text = String(reason || '解析中断').trim() || '解析中断';
+  if (text.length <= max) return text;
+  const headLen = 1200;
+  const tailLen = max - headLen;
+  const omitted = text.length - headLen - tailLen;
+  return `${text.slice(0, headLen)}\n…（中间省略 ${omitted} 字符）…\n${text.slice(-tailLen)}`;
+}
+
 /** 解析失败 / 取消：状态落成 failed，卡片上可以直接重试，不会再永远停在「解析中」 */
 function markTextbookFailed(subjectId, reason) {
   const subject = subjectManager.getSubject(subjectId);
   if (!subject) return { success: false };
   subjectManager.saveSubject({ id: subjectId, textbookStatus: 'failed' });
-  writeParseMeta(subjectId, { status: 'failed', error: String(reason || '解析中断').slice(0, 300) });
+  writeParseMeta(subjectId, { status: 'failed', error: compactErrorText(reason) });
   return { success: true };
 }
 
@@ -431,11 +445,7 @@ function withTimeout(promise, ms, label = '请求') {
   });
 }
 
-/**
- * 从教材全文提取例题与习题进题库。
- * 只处理带题目标记的段落，多段并发（默认 2 路）调用现有文本识题管线，最后合并入一份试卷。
- */
-/** 页范围筛选：按章节从教材提取题目时，只把落在指定页码内的块送给模型 */
+/** 页范围筛选：按章节从教材/资料提取题目时，只把落在指定页码内的块送给模型 */
 function chunkPageSpan(chunk) {
   const pages = [...String(chunk).matchAll(/<!--\s*第\s*(\d+)\s*页/g)].map((match) => Number(match[1]));
   if (!pages.length) return null;
@@ -454,41 +464,105 @@ function filterChunksByPages(chunks, pages) {
   });
 }
 
-async function generateTextbookQuestions({ subjectId, settings, signal, onProgress, concurrency = 2, timeoutMs = 180000, budgetMs = 10 * 60 * 1000, pages = null, title = '', paperId: appendPaperId = null, dryRun = false } = {}) {
+/**
+ * 从教材/补充资料提取例题与习题进题库。
+ * 有主教材时按主教材走；没有主教材时读全部已就绪的补充资料（可传 materialIds 限定）。
+ * 只处理带题目标记的段落，多段并发（默认 2 路）调用现有文本识题管线，最后合并入一份试卷。
+ */
+async function generateTextbookQuestions({ subjectId, settings, signal, onProgress, concurrency = 2, timeoutMs = 180000, budgetMs = 10 * 60 * 1000, pages = null, title = '', paperId: appendPaperId = null, dryRun = false, materialIds = [] } = {}) {
   const subject = subjectManager.getSubject(subjectId);
   if (!subject) throw new Error('科目不存在');
 
   const dir = subjectManager.getSubjectDir(subjectId);
   const textbookFile = path.join(dir, PAGE_DIR_NAME, '教材全文.md');
-  if (!fs.existsSync(textbookFile)) throw new Error('教材还没转写完成');
+  const hasPrimary = fs.existsSync(textbookFile);
+
+  // 来源选择：主教材优先；没有主教材时从补充资料里摘题
+  const sources = [];
+  let sourceMaterials = [];
+  if (hasPrimary) {
+    sources.push({ name: '', markdown: fs.readFileSync(textbookFile, 'utf8'), fromTextbook: true });
+  } else {
+    const index = materialManager.listMaterials(subjectId);
+    const wanted = (Array.isArray(materialIds) ? materialIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean);
+    const ready = (index.supplementary || []).filter((item) => item.status === 'ready' && item.hasText && item.textPath
+      && (!wanted.length || wanted.includes(String(item.id))));
+    if (!ready.length) {
+      throw new Error(wanted.length
+        ? '指定的补充资料还没有解析完成，无法提取题目'
+        : '还没有可提取题目的资料：请先上传主教材，或添加并解析补充资料');
+    }
+    sourceMaterials = ready;
+    for (const item of ready) {
+      const markdown = materialManager.readSupplementaryText(subjectId, item.id);
+      if (!String(markdown || '').trim()) continue;
+      // 资料转写文件自带标题与 `<!-- 第 N 页 -->` 页标记，直接拼接即可保持出处页码
+      sources.push({ name: item.name || '补充资料', markdown, fromTextbook: false, item });
+    }
+    if (!sources.length) throw new Error('补充资料的转写内容为空，无法提取题目');
+  }
 
   // 教材若带「幽灵文字层」，先整体剔除救回原文再拆段；剔除后仍损坏才报错，
-  // 避免把乱码喂给模型后静默产出 0 题
-  const textbookRaw = fs.readFileSync(textbookFile, 'utf8');
-  const questionRepair = repairGhostText(textbookRaw);
-  if (questionRepair.repaired) {
-    console.warn(`[subjectTextbook] 教材检测到幽灵文字层，已自动剔除乱码字符「${questionRepair.ghostChar}」共 ${questionRepair.removed} 处`);
+  // 避免把乱码喂给模型后静默产出 0 题。补充资料逐份剔除，个别损坏不影响其余资料。
+  const hasRange = Boolean(Number(pages?.from) || Number(pages?.to));
+  const allChunks = [];
+  const corruptSources = [];
+  const emptyRangeSources = [];
+  let candidateCount = 0;
+  for (const source of sources) {
+    const repair = repairGhostText(source.markdown);
+    if (repair.repaired) {
+      console.warn(`[subjectTextbook] ${source.name || '教材'}检测到幽灵文字层，已自动剔除乱码字符「${repair.ghostChar}」共 ${repair.removed} 处`);
+    }
+    if (repair.quality.corrupt) {
+      if (source.fromTextbook) {
+        return {
+          success: false,
+          corrupt: true,
+          questions: 0,
+          paperId: null,
+          source: 'textbook',
+          note: corruptTextMessage(repair.quality, 'questions'),
+          error: corruptTextMessage(repair.quality, 'questions'),
+        };
+      }
+      corruptSources.push(source.name);
+      continue;
+    }
+    const sourceChunks = splitTextbookChunks(repair.text);
+    if (!sourceChunks.length) {
+      if (source.fromTextbook) throw new Error('教材转写内容为空');
+      continue;
+    }
+    candidateCount += sourceChunks.length;
+    const scopedChunks = filterChunksByPages(sourceChunks, pages);
+    if (!scopedChunks.length) {
+      if (source.fromTextbook) throw new Error('指定页范围内没有可提取的教材内容');
+      emptyRangeSources.push(source.name);
+      continue;
+    }
+    const marked = scopedChunks.filter(hasExerciseMarker);
+    // 没有题目标记时退回全量（并限流），否则宁可少跑几段也别空手而归；按份限流，保证每份资料都能被扫到
+    const picked = (marked.length ? marked : scopedChunks).slice(0, hasRange ? 80 : 60);
+    picked.forEach((text) => allChunks.push({ text, source }));
   }
-  if (questionRepair.quality.corrupt) {
+  if (!allChunks.length) {
+    const skipped = [...corruptSources, ...emptyRangeSources];
     return {
       success: false,
-      corrupt: true,
       questions: 0,
       paperId: null,
-      note: corruptTextMessage(questionRepair.quality, 'questions'),
-      error: corruptTextMessage(questionRepair.quality, 'questions'),
+      source: hasPrimary ? 'textbook' : 'supplementary',
+      corrupt: corruptSources.length > 0,
+      note: skipped.length
+        ? `可用的资料内容为空或没有落在指定页范围内（${skipped.join('、')}）`
+        : '资料转写内容为空',
+      error: skipped.length ? `没有可提取的资料内容：${skipped.join('、')}` : '资料转写内容为空',
     };
   }
-  const textbookMarkdown = questionRepair.text;
-  const allChunks = splitTextbookChunks(textbookMarkdown);
-  if (!allChunks.length) throw new Error('教材转写内容为空');
-
-  const scopedChunks = filterChunksByPages(allChunks, pages);
-  if (!scopedChunks.length) throw new Error('指定页范围内没有可提取的教材内容');
-  const marked = scopedChunks.filter(hasExerciseMarker);
-  // 教材里没有任何题目标记时退回全量（并限流），否则宁可少跑几段也别空手而归
-  const hasRange = Boolean(Number(pages?.from) || Number(pages?.to));
-  const chunks = (marked.length ? marked : scopedChunks).slice(0, hasRange ? 80 : 60);
+  const chunks = allChunks;
 
   const visionSettings = aiService.resolveRoleSettings(settings, 'vision');
   const results = new Array(chunks.length);
@@ -504,7 +578,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
       done,
       total: chunks.length,
       questions: collectedCount,
-      skipped: allChunks.length - chunks.length,
+      skipped: candidateCount - chunks.length,
     });
   };
 
@@ -519,10 +593,11 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
       const index = cursor;
       cursor += 1;
       if (index >= chunks.length) return;
+      const chunk = chunks[index];
 
       try {
         const raw = await withTimeout(
-          aiService.structureQuestionsFromText(visionSettings, chunks[index], { signal }),
+          aiService.structureQuestionsFromText(visionSettings, chunk.text, { signal }),
           timeoutMs,
           '题目提取',
         );
@@ -531,7 +606,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
         // 每个块带上它来自哪一页，题目提到「图 X-Y」时才能定位到该页的插图/整页图。
         // 块可能跨多页：只用模型按「<!-- 第 N 页 -->」标记回报、且落在本块范围内的 page；
         // 拿不到就留空（不挂图），绝不拿块首页硬当题目所在页。
-        const span = chunkPageSpan(chunks[index]);
+        const span = chunkPageSpan(chunk.text);
         const sourcePageOf = (question) => {
           const reported = Number(question?.page);
           if (Number.isFinite(reported) && reported > 0
@@ -542,7 +617,12 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
           return null;
         };
         results[index] = questions.map((question) => (question && typeof question === 'object'
-          ? { ...question, __sourcePage: sourcePageOf(question), __fromTextbook: true }
+          ? {
+            ...question,
+            __sourcePage: sourcePageOf(question),
+            __fromTextbook: chunk.source.fromTextbook,
+            __sourceName: chunk.source.name || '',
+          }
           : question));
         collectedCount += questions.length;
       } catch (error) {
@@ -567,7 +647,11 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
     return {
       questions: 0,
       paperId: null,
-      note: budgetHit ? '例题提取达到时间上限，还没识别出可入库的题目' : '教材里没有识别出可入库的例题/习题',
+      source: hasPrimary ? 'textbook' : 'supplementary',
+      pendingClassification: !hasPrimary,
+      note: budgetHit
+        ? '例题提取达到时间上限，还没识别出可入库的题目'
+        : (hasPrimary ? '教材里没有识别出可入库的例题/习题' : '补充资料里没有识别出可入库的例题/习题'),
       scanned: done,
       total: chunks.length,
       partial: budgetHit,
@@ -575,27 +659,42 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
   }
 
   const database = require('./database.js');
+  const sourceMeta = () => ({
+    source: hasPrimary ? 'textbook' : 'supplementary',
+    sourceNames: sources.map((item) => item.name).filter(Boolean),
+    // 没有主教材就没有知识清单，题目先入库、暂不做知识图谱分类
+    pendingClassification: !hasPrimary,
+    classificationNote: hasPrimary ? '' : '未上传主教材：题目已入库，但还没有知识清单，暂未按知识图谱分类',
+    missingPages: sourceMaterials.flatMap((item) => (Array.isArray(item.missingPages)
+      ? item.missingPages.map((no) => `《${item.name}》第 ${no} 页`)
+      : [])),
+    corruptSources,
+    emptyRangeSources,
+  });
   // 只识别不入库：补图 / 校对时用，避免重复建卷、重复题目
   if (dryRun) {
     let questions = collected;
     let figureStats = { attached: 0, fallback: 0 };
-    try {
-      const textbookFigures = require('./textbookFigures.js');
-      const enriched = textbookFigures.attachFiguresToQuestions(subjectId, collected);
-      questions = enriched.questions;
-      figureStats = { attached: enriched.attached, fallback: enriched.fallback };
-    } catch (error) {
-      console.warn('[Subjects] 题目配图失败（dryRun）:', error?.message || error);
+    if (hasPrimary) {
+      try {
+        const textbookFigures = require('./textbookFigures.js');
+        const enriched = textbookFigures.attachFiguresToQuestions(subjectId, collected);
+        questions = enriched.questions;
+        figureStats = { attached: enriched.attached, fallback: enriched.fallback };
+      } catch (error) {
+        console.warn('[Subjects] 题目配图失败（dryRun）:', error?.message || error);
+      }
     }
     return {
       success: true,
       dryRun: true,
+      ...sourceMeta(),
       questions,
       figureStats,
       scanned: done,
       total: chunks.length,
       partial: budgetHit,
-      skipped: allChunks.length - chunks.length,
+      skipped: candidateCount - chunks.length,
     };
   }
   // 分批 / 重复解析会反复扫到同一批题目：按题干去重，只入库新题。
@@ -668,6 +767,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
     return {
       questions: 0,
       paperId: null,
+      ...sourceMeta(),
       note: '这批段落里的题目题库里都有了，没有新增',
       scanned: done,
       total: chunks.length,
@@ -676,24 +776,46 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
     };
   }
 
+  // 补充资料没有教材插图可挂，出处以「资料名 + 页码」写进材料区
+  const escapeSource = (value) => String(value || '').replace(/[&<>"]/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+  }[ch]));
+  const withSourceLabel = (question) => {
+    if (question.__fromTextbook) return question;
+    const name = String(question.__sourceName || '').trim() || '补充资料';
+    const page = Number(question.__sourcePage) || 0;
+    const label = `出处：《${name}》${page ? `第 ${page} 页` : ''}`;
+    const existingHtml = String(question.material_html || question.materialHtml || '').trim();
+    const existingText = String(question.material || '').trim();
+    const parts = [`<p>${escapeSource(label)}</p>`];
+    if (existingHtml) parts.push(existingHtml);
+    else if (existingText) parts.push(`<p>${escapeSource(existingText).replace(/\n/g, '<br />')}</p>`);
+    const materialHtml = parts.join('\n');
+    return { ...question, material_html: materialHtml, materialHtml };
+  };
+
   // 题干里提到「图 X-Y」时挂上精确裁出的插图；没裁到就退回该页整页扫描图。
   // 图片走 openexam-asset:// 协议，写进 material_html，看题时显示在「材料」区。
-  let toImport = fresh;
+  // 补充资料没有教材页图，不参与挂图，避免按相同页码挂到教材插图上。
+  let toImport = hasPrimary ? fresh : fresh.map(withSourceLabel);
   let figureStats = { attached: 0, fallback: 0 };
-  try {
-    const textbookFigures = require('./textbookFigures.js');
-    const enriched = textbookFigures.attachFiguresToQuestions(subjectId, fresh);
-    toImport = enriched.questions;
-    figureStats = { attached: enriched.attached, fallback: enriched.fallback };
-  } catch (error) {
-    console.warn('[Subjects] 题目配图失败（不影响入库）:', error?.message || error);
+  if (hasPrimary) {
+    try {
+      const textbookFigures = require('./textbookFigures.js');
+      const enriched = textbookFigures.attachFiguresToQuestions(subjectId, fresh);
+      toImport = enriched.questions;
+      figureStats = { attached: enriched.attached, fallback: enriched.fallback };
+    } catch (error) {
+      console.warn('[Subjects] 题目配图失败（不影响入库）:', error?.message || error);
+    }
   }
 
   // 一本书只保留一卷「教材例题习题」，重复解析往同一卷里追加，而不是每次都新建；
-  // 按章节提取时，允许显式指定要追加的试卷（同一章分页补录）
+  // 按章节提取时，允许显式指定要追加的试卷（同一章分页补录）。
+  // 无主教材时新建/追加独立的「资料例题习题」卷。
   const existingPaper = String(appendPaperId || '').trim()
     ? { id: String(appendPaperId).trim() }
-    : database.getSubjectTextbookPaper?.(subjectId);
+    : (hasPrimary ? database.getSubjectTextbookPaper?.(subjectId) : null);
   let paperId = existingPaper?.id || null;
   let paperTotal = 0;
   if (paperId) {
@@ -702,7 +824,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
   } else {
     const created = database.importPaper(
       {
-        title: String(title || '').trim().slice(0, 80) || `${subject.name} · 教材例题习题`,
+        title: String(title || '').trim().slice(0, 80) || `${subject.name} · ${hasPrimary ? '教材例题习题' : '资料例题习题'}`,
         subject: 'custom',
         subjectId: subject.id,
         type: 'imported',
@@ -723,6 +845,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
     total: chunks.length,
     partial: budgetHit,
     duplicateSkipped: collected.length - fresh.length,
+    ...sourceMeta(),
   };
 }
 

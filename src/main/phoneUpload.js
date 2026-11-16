@@ -77,6 +77,16 @@ function newToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+function escapeHtml(value = '') {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
+}
+
 function emit(payload) {
   if (!session?.onEvent) return;
   try {
@@ -174,14 +184,16 @@ function normalizeIncomingImages(input) {
   return { images };
 }
 
-function mobilePage(token) {
+function mobilePage(token, { title = '传图给 AI 助教', lead = '拍照或从相册选图，图片会直接进入电脑上当前打开的会话。本次上传只在电脑端关闭前有效。' } = {}) {
+  const pageTitle = escapeHtml(title);
+  const pageLead = escapeHtml(lead);
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f172a">
-<title>传图给 AI 助教</title>
+<title>${pageTitle}</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin: 0; min-height: 100vh; background: #0f172a; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; padding: 24px 20px calc(24px + env(safe-area-inset-bottom)); }
@@ -200,8 +212,8 @@ function mobilePage(token) {
 </style>
 </head>
 <body>
-  <h1>传图给 AI 助教</h1>
-  <p class="lead">拍照或从相册选图，图片会直接进入电脑上当前打开的会话。本次上传只在电脑端关闭前有效。</p>
+  <h1>${pageTitle}</h1>
+  <p class="lead">${pageLead}</p>
   <div class="actions">
     <button class="act" id="camera" type="button">📷 拍照上传</button>
     <button class="act secondary" id="album" type="button">🖼 从相册选择</button>
@@ -408,7 +420,7 @@ function createRequestHandler() {
 
     if (request.method === 'GET' && url.pathname.startsWith('/u/')) {
       emit({ type: 'opened', userAgent: String(request.headers['user-agent'] || '') });
-      return sendHtml(response, mobilePage(session.token));
+      return sendHtml(response, mobilePage(session.token, { title: session.title, lead: session.lead }));
     }
 
     if (request.method === 'POST' && url.pathname === '/api/upload') {
@@ -435,7 +447,7 @@ function listen(server, port) {
   });
 }
 
-async function start({ onEvent } = {}) {
+async function start({ onEvent, title, lead } = {}) {
   if (session) {
     return { success: true, reused: true, ...currentPayload() };
   }
@@ -498,6 +510,8 @@ async function start({ onEvent } = {}) {
     idleTimer: null,
     ttlTimer: null,
     portNote,
+    title: String(title || '').trim().slice(0, 40) || '传图给 AI 助教',
+    lead: String(lead || '').trim().slice(0, 120) || '拍照或从相册选图，图片会直接进入电脑上当前打开的会话。本次上传只在电脑端关闭前有效。',
   };
   resetIdleTimer();
   session.ttlTimer = setTimeout(() => {

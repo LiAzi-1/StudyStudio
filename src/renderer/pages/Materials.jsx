@@ -42,6 +42,9 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null);
   const [envIssue, setEnvIssue] = useState("");
+  const [envCheck, setEnvCheck] = useState({ loading: true });
+  const [envInstall, setEnvInstall] = useState(null);
+  const [primaryRetry, setPrimaryRetry] = useState(null);
   const [progress, setProgress] = useState(null);
   const [tasks, setTasks] = useState({});
   const [dragZone, setDragZone] = useState("");
@@ -84,6 +87,26 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const refreshEnv = useCallback(async () => {
+    try {
+      const result = await window.openexam?.runtimeEnv?.detect?.();
+      setEnvCheck({ loading: false, ...(result?.mineru || {}) });
+    } catch (error) {
+      // 检测本身失败时不挡上传，交给主进程预检兜底
+      setEnvCheck({ loading: false, error: error?.message || String(error) });
+    }
+  }, []);
+
+  // 进入资料管理就做一次 PDF 环境体检，别等用户选完文件才报错
+  useEffect(() => { refreshEnv(); }, [refreshEnv]);
+  useEffect(() => {
+    window.openexam?.runtimeEnv?.getState?.().then((state) => {
+      if (state?.running) setEnvInstall(state);
+    }).catch(() => {});
+    const off = window.openexam?.runtimeEnv?.onProgress?.((payload) => setEnvInstall(payload));
+    return () => { off?.(); };
+  }, []);
+
   useEffect(() => {
     const offChanged = window.openexam?.materials?.onChanged?.((payload) => {
       if (!payload?.subjectId || payload.subjectId === subjectId) refresh();
@@ -120,6 +143,11 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
   };
 
   const runPrimaryUpload = async (filePath, fileName) => {
+    if (envCheck.ready === false) {
+      setEnvIssue("PDF 解析环境还没准备好，请先在上方完成安装，或打开「设置 → 运行环境」查看缺什么。");
+      return;
+    }
+    setPrimaryRetry(null);
     setBusy("primary");
     setEnvIssue("");
     try {
@@ -128,6 +156,9 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
         // 缺 Python / MinerU / 模型：主进程在进入解析前就拦下并说明了缺什么
         if (result?.code === "mineru-not-ready") {
           setEnvIssue(result.error || "本地解析环境未就绪");
+        } else {
+          // 解析中断/失败：保留文件路径，提供「重试上次文件」
+          setPrimaryRetry({ filePath, fileName });
         }
         throw new Error(result?.error || "主教材解析失败");
       }
@@ -139,6 +170,32 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
     } finally {
       setBusy("");
       setProgress(null);
+      refreshEnv();
+    }
+  };
+
+  const cancelPrimary = async () => {
+    try {
+      await window.openexam?.materials?.cancelPrimary?.(subjectId);
+    } catch (error) {
+      flash("error", error?.message || String(error));
+    }
+  };
+
+  const startEnvInstall = async () => {
+    setEnvInstall((prev) => ({ ...(prev || {}), running: true }));
+    try {
+      const result = await window.openexam?.runtimeEnv?.install?.({});
+      if (result?.success) {
+        flash("ok", result.alreadyReady ? "解析环境已就绪" : "解析环境安装完成，现在可以上传 PDF 了");
+      } else if (result?.error) {
+        setEnvIssue(result.error);
+      }
+    } catch (error) {
+      setEnvIssue(error?.message || String(error));
+    } finally {
+      setEnvInstall((prev) => ({ ...(prev || {}), running: false }));
+      await refreshEnv();
     }
   };
 
@@ -316,6 +373,17 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
   const materials = data.supplementary || [];
   const isPrimaryBusy = busy === "primary";
   const showProgress = Boolean(progress && isPrimaryBusy);
+  const envBlocked = envCheck.ready === false && !envCheck.error;
+  const envMissing = Array.isArray(envCheck.missing) ? envCheck.missing : [];
+  const envMissingText = envMissing.map((key) => ({
+    python: "Python 3.10–3.12（64 位）",
+    mineru: "MinerU 包",
+    models: "本地模型",
+    workDir: "工作目录",
+    script: "解析脚本",
+  }[key] || key)).join("、");
+  const envInstallRunning = Boolean(envInstall?.running);
+  const envInstallPercent = Math.max(0, Math.min(100, Number(envInstall?.percent) || 0));
 
   return (
     <div
@@ -340,6 +408,40 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
         </header>
       ) : null}
 
+      {envBlocked ? (
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16, padding: '14px 16px',
+          border: '1px solid var(--m-border)', borderRadius: 10, background: 'var(--warning-soft)',
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--warning)' }}>PDF 解析环境还没准备好</div>
+          <div style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--m-muted)' }}>
+            缺少：{envMissingText || "解析组件"}。MinerU 和模型体积较大（模型至少数百 MB），首次安装通常要十几分钟到半小时，取决于网速。
+            {envCheck.python?.ok ? ' Python 已就绪，可以直接在这里开始安装。' : ' 需要先安装 Python 3.10–3.12（64 位），再回来继续。'}
+          </div>
+          {envInstallRunning ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div className="materials-progress-bar" style={{ flex: 1 }}>
+                <div style={{ width: `${envInstallPercent}%` }} />
+              </div>
+              <span style={{ fontSize: 12, color: 'var(--m-muted)' }}>{envInstall?.detail || '安装中…'} {envInstallPercent}%</span>
+            </div>
+          ) : null}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {envCheck.python?.ok ? (
+              <button type="button" className="materials-btn is-primary" onClick={startEnvInstall} disabled={envInstallRunning}>
+                {envInstallRunning ? '安装中…' : (envMissing.length ? '一键安装解析环境' : '重新检测')}
+              </button>
+            ) : (
+              <button type="button" className="materials-btn is-primary" onClick={() => onOpenSettings?.("runtime")}>
+                去安装 Python
+              </button>
+            )}
+            <button type="button" className="materials-btn" onClick={() => onOpenSettings?.("runtime")}>打开运行环境设置</button>
+            <button type="button" className="materials-btn is-ghost" onClick={refreshEnv} disabled={envInstallRunning}>重新检测</button>
+          </div>
+        </div>
+      ) : null}
+
       {envIssue ? (
         <div className="materials-notice is-error" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <span style={{ flex: 1, minWidth: 220 }}>{envIssue}</span>
@@ -358,6 +460,7 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
           </div>
           <span>{progress?.detail || "解析中…"}</span>
           <strong>{Math.min(100, Number(progress?.percent) || 0)}%</strong>
+          <button type="button" className="materials-btn is-mini" onClick={cancelPrimary}>停止解析</button>
         </div>
       ) : null}
 
@@ -373,7 +476,13 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
             <h2><span className="materials-badge is-primary">主教材</span>权威来源</h2>
             <p className="materials-section-sub">知识清单、概念定义、章节范围与例题都以它为准。</p>
           </div>
-          <button type="button" className="materials-btn is-primary" onClick={uploadPrimary} disabled={Boolean(busy)}>
+          <button
+            type="button"
+            className="materials-btn is-primary"
+            onClick={uploadPrimary}
+            disabled={Boolean(busy) || envBlocked}
+            title={envBlocked ? "先完成上方的 PDF 解析环境安装" : undefined}
+          >
             {isPrimaryBusy ? "解析中…" : primary.name ? "更换主教材" : "上传主教材"}
           </button>
         </div>
@@ -394,9 +503,21 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
           </div>
         ) : (
           <div className="materials-empty">
-            还没有主教材。把 PDF 拖到本区域，或点击「上传主教材」；解析会按每 10 页一批本地 OCR 并显示进度。
+            还没有主教材。把 PDF 拖到本区域，或点击「上传主教材」；解析会按页显示进度，过程中可以随时停止。
           </div>
         )}
+        {primaryRetry && !isPrimaryBusy ? (
+          <div className="materials-hint" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span>上次没解析成功：{primaryRetry.fileName}</span>
+            <button
+              type="button"
+              className="materials-btn is-mini"
+              onClick={() => runPrimaryUpload(primaryRetry.filePath, primaryRetry.fileName)}
+            >
+              重试上次文件
+            </button>
+          </div>
+        ) : null}
         {primary.status === "failed" ? (
           <p className="materials-hint">上次解析中断，重新点击「更换主教材」会从上次已完成的页码继续。</p>
         ) : null}
@@ -424,7 +545,8 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
             {materials.map((item) => {
               const task = tasks[item.id];
               const parsing = Boolean(task) || item.status === "parsing";
-              const canParse = item.status !== "ready" && AUTO_PARSE_KINDS.has(item.kind) && !parsing && !busy;
+              const needsReparse = item.status === "ready" && Boolean(item.missingPages?.length);
+              const canParse = (item.status !== "ready" || needsReparse) && AUTO_PARSE_KINDS.has(item.kind) && !parsing && !busy;
               const taskText = task
                 ? (task.status === "queued"
                   ? `排队中${task.position ? `（第 ${task.position} 位）` : ""}`
@@ -438,6 +560,9 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
                     <div className="materials-file-meta">
                       {formatSize(item.size)} · {task ? taskText : (STATUS_TEXT[item.status] || item.status)}
                       {!task && item.chars ? ` · 转写 ${item.chars} 字` : ""}
+                      {!task && item.missingPages?.length
+                        ? ` · ${item.pages}/${item.totalPages || item.pages} 页，未转出：第 ${item.missingPages.slice(0, 6).join("、")}${item.missingPages.length > 6 ? "…" : ""} 页`
+                        : ""}
                       {!task && item.error ? ` · ${String(item.error).slice(0, 60)}` : ""}
                     </div>
                     {task ? (
@@ -451,7 +576,7 @@ export default function Materials({ subjectId, onBack, embedded = false, onOpenS
                   </div>
                   <div className="materials-row-actions">
                     {canParse ? (
-                      <button type="button" className="materials-btn is-mini" onClick={() => parseOne(item)}>解析</button>
+                      <button type="button" className="materials-btn is-mini" onClick={() => parseOne(item)}>{needsReparse ? "重新解析" : "解析"}</button>
                     ) : null}
                     {!task && item.status === "ready" && item.hasText ? <span className="materials-ready">可供 AI 参考</span> : null}
                     {task ? <span className="materials-ready">{task.status === "queued" ? "排队中…" : "解析中…"}</span> : null}

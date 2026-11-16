@@ -16,10 +16,11 @@ import {
 
 const ACTIVE_SESSION_KEY = 'openexam_ai_active_session';
 const QUESTION_CONTEXT_KEY = 'openexam_question_context';
+const DRAFT_KEY = 'openexam_ai_draft_v1';
 
 const SUGGESTIONS = [
   { label: '讲这道题', prompt: '请一步一步讲清楚这道题，指出我容易卡住的步骤' },
-  { label: '总结知识点', prompt: '请总结这类题涉及的知识点和通用解题方法' },
+  { label: '总结知识点', prompt: '只总结这类题涉及的知识点和通用解题方法，不要拓展、不要延伸阅读、不要写学习建议或鼓励语，结构清晰能直接存成笔记' },
   { label: '收进错题本', prompt: '把这轮讲过的题收进错题本，标注我的错因' },
   { label: '安排今天', prompt: '根据我现在的进度，帮我调整今天的学习任务' },
 ];
@@ -75,13 +76,16 @@ function Modal({ title, children, onClose, footer }) {
   );
 }
 
-export default function AIConversation({ onNavigate, incomingSubjectId = '' }) {
+export default function AIConversation({ onNavigate, incomingSubjectId = '', onOpenSettings }) {
   const { toast, confirm, prompt } = useDialog();
   const [subjects, setSubjects] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [activeId, setActiveId] = useState('');
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
+  // 去设置配好 AI 再回来时，不丢掉已经打了一半的问题
+  const [input, setInput] = useState(() => {
+    try { return sessionStorage.getItem(DRAFT_KEY) || ''; } catch { return ''; }
+  });
   const [images, setImages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [streamText, setStreamText] = useState('');
@@ -100,6 +104,16 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '' }) {
   const messagesRef = useRef([]);
   const listRef = useRef(null);
   const fileRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      if (input) sessionStorage.setItem(DRAFT_KEY, input);
+      else sessionStorage.removeItem(DRAFT_KEY);
+    } catch { /* 存不下只影响跨页保留草稿 */ }
+  }, [input]);
+
+  // 每次进入页面重新判断：用户可能刚从设置里配置好模型
+  const assistantConfigured = isAssistantConfigured();
 
   const loadSubjects = useCallback(async () => {
     try {
@@ -561,6 +575,20 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '' }) {
               {activeSession?.subject_id ? `科目：${subjects.find((item) => item.id === activeSession.subject_id)?.name || '已绑定'}` : ''}
             </span>
           </div>
+          {!assistantConfigured ? (
+            <div style={{
+              marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              padding: '9px 12px', borderRadius: 9, border: '1px solid var(--warning-border)',
+              background: 'var(--warning-soft)', fontSize: 11.5, lineHeight: 1.6,
+            }}>
+              <span style={{ flex: 1, minWidth: 220 }}>
+                AI 还没配置，讲题、录题和写笔记都用不了。先配置一个「老师」或「识图」角色即可。
+              </span>
+              <button type="button" onClick={() => onOpenSettings?.()} style={{ ...BTN(true), padding: '5px 11px' }}>
+                去配置 AI
+              </button>
+            </div>
+          ) : null}
           {pinnedContext ? (
             <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: 'var(--surface-soft)', border: '1px solid var(--line)' }}>
               <span style={{ fontSize: 11, color: 'var(--accent)', whiteSpace: 'nowrap' }}>当前题目</span>

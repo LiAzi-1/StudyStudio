@@ -349,6 +349,8 @@ function ensureQuestionsSchema() {
     ['answer_status', "TEXT DEFAULT 'unverified'"],
     ['answer_confidence', 'REAL'],
     ['answer_updated_at', 'TEXT'],
+    // 用户补充的答案图片：JSON 数组，存 openexam-asset://question-assets/... 引用，图片文件本身不落库
+    ['answer_images', 'TEXT'],
     ['textbook_format_version', 'INTEGER DEFAULT 0'],
   ];
 
@@ -405,6 +407,40 @@ function ensureDailyPracticeSchema() {
   `);
 }
 
+// 打开主库并切到 WAL；失败时关闭连接，交给上层决定是否重试
+function openDatabaseFile(dbPath) {
+  const conn = new Database(dbPath);
+  try {
+    conn.pragma('journal_mode = WAL');
+    return conn;
+  } catch (error) {
+    try { conn.close(); } catch { /* 忽略 */ }
+    throw error;
+  }
+}
+
+/**
+ * 打开主库。上次解析中途被强制结束时，可能留下无法回放的 -wal/-shm
+ * （文件仍被映射时 SQLite 报 SQLITE_IOERR_TRUNCATE / SQLITE_CANTOPEN），
+ * 导致之后每次启动都卡在 WAL 初始化。这里清理残留文件后重试一次，
+ * 让应用能从异常退出中恢复，而不是永远打不开。
+ */
+function openDatabaseWithRecovery(dbPath) {
+  try {
+    return openDatabaseFile(dbPath);
+  } catch (error) {
+    console.warn('[DB] 主库 WAL 初始化失败，尝试清理上次中断留下的 WAL/SHM 后重试:', error?.message || error);
+    for (const suffix of ['-wal', '-shm']) {
+      try {
+        fs.rmSync(`${dbPath}${suffix}`, { force: true });
+      } catch (cleanupError) {
+        console.warn(`[DB] 清理 ${suffix} 失败:`, cleanupError?.message || cleanupError);
+      }
+    }
+    return openDatabaseFile(dbPath);
+  }
+}
+
 // 初始化数据库
 function initDatabase() {
   const userDataPath = app.getPath('userData');
@@ -413,8 +449,7 @@ function initDatabase() {
   fs.mkdirSync(userDataPath, { recursive: true });
 
   // 不再从内置种子库初始化：新用户得到的是空题库，只保存用户自己传入的内容。
-  db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
+  db = openDatabaseWithRecovery(dbPath);
 
   // 创建表
   db.exec(`
@@ -446,6 +481,7 @@ function initDatabase() {
       material_group_id TEXT,
       options TEXT NOT NULL,
       answer TEXT NOT NULL,
+      answer_images TEXT,
       analysis TEXT,
       analysis_html TEXT,
       difficulty INTEGER DEFAULT 2,
@@ -602,7 +638,20 @@ function initDatabase() {
 
 // 获取所有试卷
 function getPapers() {
-  return normalizePaperRecords(db.prepare('SELECT * FROM papers ORDER BY year DESC, created_at DESC').all());
+  // 顺带算出每份试卷「既没有文字答案、也没有图片答案」的题数，题库列表直接标出来
+  const rows = db.prepare(`
+    SELECT p.*,
+           (
+             SELECT COUNT(*)
+             FROM questions q
+             WHERE q.paper_id = p.id
+               AND TRIM(COALESCE(q.answer, '')) = ''
+               AND COALESCE(NULLIF(TRIM(q.answer_images), ''), '[]') IN ('[]', 'null')
+           ) AS missing_answer_count
+    FROM papers p
+    ORDER BY p.year DESC, p.created_at DESC
+  `).all();
+  return normalizePaperRecords(rows);
 }
 
 // 获取试卷题目；limit 用于「只做题目选择器」这类只要前 N 道的场景
@@ -755,11 +804,7 @@ function getQuestionsByIds(ids = []) {
   if (!list.length) return [];
   const placeholders = list.map(() => '?').join(', ');
   const rows = db.prepare(`SELECT * FROM questions WHERE id IN (${placeholders})`).all(...list);
-  const byId = new Map(rows.map((row) => [row.id, {
-    ...row,
-    options: row.options ? JSON.parse(row.options) : [],
-    tags: row.tags ? String(row.tags).split(',').filter(Boolean) : [],
-  }]));
+  const byId = new Map(rows.map((row) => [row.id, mapQuestionRow(row)]));
   return list.map((id) => byId.get(id)).filter(Boolean);
 }
 
@@ -1706,6 +1751,10 @@ function getSubjectChapterDistribution(subjectId) {
 function getSmartRecommend(options = {}) {
   const limit = Math.min(8, Math.max(1, Number(options.limit) || 5));
   const categoryNames = {
+    math: '数学',
+    english: '英语',
+    politics: '政治',
+    major: '专业课',
     yanyu: '言语理解',
     shuliang: '数量关系',
     panduan: '判断推理',
@@ -1729,6 +1778,8 @@ function getSmartRecommend(options = {}) {
 
   const categoryStats = getCategoryStats()
     .filter((row) => row.category)
+    // 题库里没有题目的科目不生成「今日提醒」；否则空题库也会出现 3 条点开即死的推荐
+    .filter((row) => Number(row.total) > 0)
     .sort((a, b) => {
       const aAcc = Number(a.accuracy || 0);
       const bAcc = Number(b.accuracy || 0);
@@ -2106,7 +2157,7 @@ function savePaperBundle(paperData = {}, questions = [], fallbackType = 'importe
 function updateQuestionAnswer(questionId, input = {}) {
   const id = String(questionId || '').trim();
   if (!id) throw new Error('题目 ID 不能为空');
-  const current = db.prepare('SELECT id, type, answer, analysis, analysis_html FROM questions WHERE id = ?').get(id);
+  const current = db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
   if (!current) throw new Error('题目不存在');
   const isObjective = ['single', 'multiple', 'judge'].includes(String(current.type || '').toLowerCase());
   const answer = input.answer === undefined
@@ -2122,15 +2173,67 @@ function updateQuestionAnswer(questionId, input = {}) {
   const analysisHtml = input.analysis === undefined
     ? null
     : toTextbookHtml(analysis, 'analysis');
+  const answerImages = input.answerImages === undefined
+    ? parseAnswerImages(current.answer_images)
+    : parseAnswerImages(input.answerImages);
   const source = String(input.answerSource || input.source || 'ai_teacher').trim() || 'ai_teacher';
-  const status = String(input.answerStatus || 'verified').trim() || 'verified';
+  const hasAnswer = Boolean(String(answer || '').trim()) || answerImages.length > 0;
+  const status = String(
+    input.answerStatus
+    || (input.answerImages === undefined
+      ? 'verified'
+      : (hasAnswer ? (source.startsWith('user_') ? 'user_supplemented' : 'verified') : 'missing'))
+  ).trim() || 'verified';
   const confidence = input.answerConfidence === undefined ? 1 : Math.max(0, Math.min(1, Number(input.answerConfidence) || 0));
   db.prepare(`
     UPDATE questions
-    SET answer = ?, analysis = ?, analysis_html = COALESCE(?, analysis_html),
+    SET answer = ?, analysis = ?, analysis_html = COALESCE(?, analysis_html), answer_images = ?,
         answer_source = ?, answer_status = ?, answer_confidence = ?, answer_updated_at = datetime('now')
     WHERE id = ?
-  `).run(answer, analysis, analysisHtml, source, status, confidence, id);
+  `).run(answer, analysis, analysisHtml, JSON.stringify(answerImages), source, status, confidence, id);
+  return mapQuestionRow(db.prepare('SELECT * FROM questions WHERE id = ?').get(id));
+}
+
+/** 追加一张答案图片引用（图片文件已由 questionAssets 落盘） */
+function addQuestionAnswerImage(questionId, url) {
+  const id = String(questionId || '').trim();
+  const imageUrl = String(url || '').trim();
+  if (!id || !imageUrl) throw new Error('题目 ID 和图片地址不能为空');
+  const current = db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
+  if (!current) throw new Error('题目不存在');
+  const images = parseAnswerImages(current.answer_images);
+  const next = images.includes(imageUrl) ? images : [...images, imageUrl];
+  const hasText = Boolean(String(current.answer || '').trim());
+  db.prepare(`
+    UPDATE questions
+    SET answer_images = ?, answer_source = ?, answer_status = 'user_supplemented',
+        answer_updated_at = datetime('now')
+    WHERE id = ?
+  `).run(JSON.stringify(next), hasText ? 'user_supplement' : 'user_image', id);
+  return mapQuestionRow(db.prepare('SELECT * FROM questions WHERE id = ?').get(id));
+}
+
+/** 删除一张答案图片引用并回写状态；没有文字答案也没有图片时回落为「缺答案」 */
+function removeQuestionAnswerImage(questionId, url) {
+  const id = String(questionId || '').trim();
+  const imageUrl = String(url || '').trim();
+  if (!id || !imageUrl) throw new Error('题目 ID 和图片地址不能为空');
+  const current = db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
+  if (!current) throw new Error('题目不存在');
+  const next = parseAnswerImages(current.answer_images).filter((item) => item !== imageUrl);
+  const hasText = Boolean(String(current.answer || '').trim());
+  const hasAnswer = hasText || next.length > 0;
+  db.prepare(`
+    UPDATE questions
+    SET answer_images = ?, answer_source = ?, answer_status = ?,
+        answer_updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    JSON.stringify(next),
+    hasAnswer ? (current.answer_source && String(current.answer_source).startsWith('user_') ? current.answer_source : 'user_supplement') : String(current.answer_source || 'imported'),
+    hasAnswer ? 'user_supplemented' : 'missing',
+    id
+  );
   return mapQuestionRow(db.prepare('SELECT * FROM questions WHERE id = ?').get(id));
 }
 
@@ -2520,12 +2623,25 @@ function deleteSavedPaper(paperId) {
   return { id: paper.id, title: paper.title, type: paper.type, ...summary };
 }
 
+/** 解析 answer_images 列：兼容 JSON 数组 / 空值 / 历史脏数据 */
+function parseAnswerImages(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapQuestionRow(row) {
   if (!row) return null;
   return {
     ...row,
     options: parseOptions(row.options),
     tags: row.tags ? String(row.tags).split(',').filter(Boolean) : [],
+    answerImages: parseAnswerImages(row.answer_images),
     has_material: hasUsableMaterial(row),
     practiceable: isPracticeableQuestion(row),
   };
@@ -3486,8 +3602,8 @@ function importAllData(payload = {}) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertQuestion = db.prepare(`
-    INSERT INTO questions (id, paper_id, order_num, type, category, sub_category, chapter, content, content_html, options, answer, analysis, analysis_html, difficulty, tags, textbook_format_version, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO questions (id, paper_id, order_num, type, category, sub_category, chapter, content, content_html, options, answer, answer_images, answer_source, answer_status, answer_confidence, answer_updated_at, analysis, analysis_html, difficulty, tags, textbook_format_version, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertPracticeRecord = db.prepare(`
     INSERT INTO practice_records (id, paper_id, category, sub_category, start_time, end_time, duration, status, answers, correct_count, total_count, accuracy, score, created_at)
@@ -3555,6 +3671,8 @@ function importAllData(payload = {}) {
         subCategory: question.sub_category,
         content,
       });
+      const restoredAnswerImages = parseAnswerImages(question.answer_images ?? question.answerImages);
+      const restoredAnswer = String(formatted.answer ?? '').trim();
       insertQuestion.run(
         questionId,
         paperId,
@@ -3566,7 +3684,12 @@ function importAllData(payload = {}) {
         content,
         String(formatted.content_html || formatted.contentHtml || '').trim() || null,
         JSON.stringify(normalizeQuestionOptions(formatted.options)),
-        String(formatted.answer ?? '').trim(),
+        restoredAnswer,
+        JSON.stringify(restoredAnswerImages),
+        String(question.answer_source || 'imported'),
+        String(question.answer_status || ((restoredAnswer || restoredAnswerImages.length) ? 'unverified' : 'missing')),
+        Number.isFinite(Number(question.answer_confidence)) ? Number(question.answer_confidence) : null,
+        question.answer_updated_at || null,
         String(formatted.analysis || ''),
         String(formatted.analysis_html || formatted.analysisHtml || '').trim() || null,
         Math.max(1, Math.min(5, Number(formatted.difficulty) || 2)),
@@ -3839,6 +3962,8 @@ module.exports = {
   getQuestionsByPaperId,
   getQuestionsByIds,
   updateQuestionAnswer,
+  addQuestionAnswerImage,
+  removeQuestionAnswerImage,
   savePracticeRecord,
   getPracticeRecords,
   addWrongQuestion,

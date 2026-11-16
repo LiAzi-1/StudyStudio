@@ -14,15 +14,20 @@ if os.name == "nt":
     _original_popen = subprocess.Popen
 
     if not getattr(_original_popen, "_openexam_hidden_window", False):
-        def _hidden_popen(*args, **kwargs):
-            flags = kwargs.get("creationflags", 0)
-            kwargs["creationflags"] = flags | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            if kwargs.get("startupinfo") is None:
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-                kwargs["startupinfo"] = startupinfo
-            return _original_popen(*args, **kwargs)
+        # 必须是 Popen 的子类：asyncio.windows_utils 等标准库会写
+        # `class Popen(subprocess.Popen)`，替换成函数会导致继承时报
+        # TypeError: function() argument 'code' must be code, not str
+        class _HiddenWindowPopen(_original_popen):
+            _openexam_hidden_window = True
 
-        _hidden_popen._openexam_hidden_window = True
-        subprocess.Popen = _hidden_popen
+            def __init__(self, *args, **kwargs):
+                flags = kwargs.get("creationflags", 0)
+                kwargs["creationflags"] = flags | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if kwargs.get("startupinfo") is None:
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+                    kwargs["startupinfo"] = startupinfo
+                super().__init__(*args, **kwargs)
+
+        subprocess.Popen = _HiddenWindowPopen

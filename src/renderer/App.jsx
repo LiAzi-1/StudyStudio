@@ -210,7 +210,10 @@ function AppMain() {
   const [paperSearchFocusToken, setPaperSearchFocusToken] = useState(0);
   // 题库练习默认落在「科目浏览」；从顶部搜索进入时直接展开「试卷与模拟考」
   const [practiceView, setPracticeView] = useState("subjects");
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(() => {
+    // 第一次打开默认展开，让「我的科目 / 笔记 / 错题本」有文字标签；之后记住用户的选择
+    try { return localStorage.getItem("openexam_sidebar_expanded") !== "0"; } catch { return true; }
+  });
   const [assistantSubjectId, setAssistantSubjectId] = useState("");
   const [materialsSubjectId, setMaterialsSubjectId] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -219,6 +222,8 @@ function AppMain() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [profile, setProfile] = useState({ name: "考生用户", avatar: "" });
   const [settingsSection, setSettingsSection] = useState("ai");
+  // 从「去配置 AI / 去装环境」进入设置时，返回键回到原页面而不是首页
+  const [settingsReturnPage, setSettingsReturnPage] = useState("");
   const userMenuRef = useRef(null);
   const onboardingCloseTimerRef = useRef(null);
   const appRevealTimerRef = useRef(null);
@@ -385,6 +390,13 @@ function AppMain() {
     if (targetPage) setPage(targetPage);
   };
 
+  /** 从任何页面跳到设置：记下来源页，配置/安装完成后返回原处 */
+  const openSettings = (section = "ai", returnPage = "") => {
+    setSettingsSection(section);
+    setSettingsReturnPage(returnPage || "");
+    setPage("settings");
+  };
+
   const onboarding = (
     <OnboardingTour
       open={showOnboarding}
@@ -500,7 +512,7 @@ function AppMain() {
   };
 
   // 看题模式：只读浏览题干、答案与解析，不计时、不交卷、不要求做完
-  const handleOpenReview = async (paperId, title = '') => {
+  const handleOpenReview = async (paperId, title = '', options = {}) => {
     const id = String(paperId || '').trim();
     if (!id) return;
     try {
@@ -516,7 +528,12 @@ function AppMain() {
     setActiveTab('题库练习');
     setExamResumeRecord(null);
     setCurrentPaperId(id);
-    setPracticeConfig({ mode: 'review', title: title || '看题', sourcePaperId: id });
+    setPracticeConfig({
+      mode: 'review',
+      title: title || '看题',
+      sourcePaperId: id,
+      startAtMissing: Boolean(options?.startAtMissing),
+    });
     setResultReturnPage('practice');
     setPage('exam');
   };
@@ -1135,7 +1152,13 @@ function AppMain() {
       <div className={appStageClassName}>
         <div className={`frame ${sidebarExpanded ? 'sidebar-expanded' : ''}`}>
         <aside className="rail">
-          <button className="rail-menu" aria-label="菜单" onClick={() => setSidebarExpanded(!sidebarExpanded)}>
+          <button className="rail-menu" aria-label="菜单" onClick={() => {
+            setSidebarExpanded((prev) => {
+              const next = !prev;
+              try { localStorage.setItem("openexam_sidebar_expanded", next ? "1" : "0"); } catch { /* 存不下不影响 */ }
+              return next;
+            });
+          }}>
             <span /><span /><span />
           </button>
           <div className="rail-icons">
@@ -1183,7 +1206,7 @@ function AppMain() {
             <button
               className="rail-user"
               data-tip="个人资料"
-              onClick={() => { setSettingsSection('profile'); setPage('settings'); }}
+              onClick={() => openSettings('profile')}
             >
               {profile.avatar ? <img src={profile.avatar} alt="" /> : avatarLetter}
             </button>
@@ -1194,7 +1217,7 @@ function AppMain() {
               </svg>
               <span className="rail-icon-text">主控制台</span>
             </button>
-            <button className={`rail-bottom-icon settings-icon ${page === 'settings' ? 'active' : ''}`} data-tip="系统设置" onClick={() => setPage('settings')}>
+            <button className={`rail-bottom-icon settings-icon ${page === 'settings' ? 'active' : ''}`} data-tip="系统设置" onClick={() => openSettings('ai')}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3"/>
                 <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
@@ -1262,7 +1285,7 @@ function AppMain() {
                           <div className="user-menu-subtitle">本地学习账户</div>
                         </div>
                       </div>
-                      <button type="button" className="user-menu-item" onClick={() => { setSettingsSection("profile"); handleUserMenuNavigate("settings"); }}>个人资料</button>
+                      <button type="button" className="user-menu-item" onClick={() => { openSettings("profile"); setUserMenuOpen(false); }}>个人资料</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("home", "学习中心")}>学习中心</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("growth", "我的成长")}>我的成长</button>
                       <button type="button" className="user-menu-item" onClick={() => handleUserMenuNavigate("achievements", "我的成长")}>成就列表</button>
@@ -1276,14 +1299,14 @@ function AppMain() {
                       >
                         {theme === "light" ? "切换深色模式" : "切换浅色模式"}
                       </button>
-                      <button type="button" className="user-menu-item danger" onClick={() => handleUserMenuNavigate("settings")}>系统设置</button>
+                      <button type="button" className="user-menu-item danger" onClick={() => { openSettings("ai"); setUserMenuOpen(false); }}>系统设置</button>
                     </div>
                   )}
                 </div>
                 <button className="theme-toggle" onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
                   {theme === "light" ? "☾" : "☀"}
                 </button>
-                <button className="settings-btn" onClick={() => setPage("settings")}> 
+                <button className="settings-btn" onClick={() => openSettings("ai")}> 
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                   </svg>
@@ -1297,12 +1320,19 @@ function AppMain() {
               {page === "today" ? (
                 <Today
                   onStartDrill={() => { setActiveTab('题库练习'); setPage('practice'); }}
-                  onStartVocab={() => { setActiveTab('题库练习'); handleStartPractice('yanyu', 'xuanci', { questionCount: 15, mode: 'practice', shuffle: true }); }}
+                  onStartVocab={(item) => {
+                    const config = item?.config || {};
+                    setActiveTab('题库练习');
+                    // 旧模板遗留 source=xuanci（行测选词填空）；统一回落到考研英语
+                    handleStartPractice(config.category || 'english', config.subCategory || 'all', { questionCount: 15, mode: 'practice', shuffle: true });
+                  }}
                   onStartEssay={() => { setActiveTab('题库练习'); setPage('practice'); }}
                   onOpenNotes={() => { setActiveTab(''); setPage('notes'); }}
                   onStartReview={handleStartTodayReview}
                   onStartDailyPractice={handleStartDailyPractice}
                   onOpenDailyReview={handleOpenDailyReview}
+                  onOpenImport={() => setPage('import')}
+                  onOpenMaterials={() => { setActiveTab(''); setPage('subjects'); }}
                 />
               ) : page === "notes" ? (
                 <Notes onBack={() => { setActiveTab('今日'); setPage('today'); }} />
@@ -1321,8 +1351,8 @@ function AppMain() {
                   onHistory={() => setPage("history")}
                   onGoAIGenerate={handleGoToAIGenerate}
                   onOpenPaper={(paper) => handleOpenPaper(paper, 'practice')}
-                  onReviewPaper={(paper) => handleOpenReview(paper?.id, paper?.title)}
-                  onOpenSettings={(section) => { setSettingsSection(section || "runtime"); setPage("settings"); }}
+                  onReviewPaper={(paper, options) => handleOpenReview(paper?.id, paper?.title, options)}
+                  onOpenSettings={(section) => openSettings(section || "runtime", page)}
                   onOpenRecord={handleOpenPracticeRecord}
                   initialKeyword={paperSearchKeyword}
                   focusToken={paperSearchFocusToken}
@@ -1332,19 +1362,23 @@ function AppMain() {
               ) : page === "import" ? null
               : page === "settings" ? (
                 <Settings
-                  onBack={() => setPage("home")}
+                  onBack={() => { const back = settingsReturnPage || "home"; setSettingsReturnPage(""); setPage(back); }}
                   profile={profile}
                   initialSection={settingsSection}
                   onProfileSaved={handleProfileSaved}
                 />
               ) : page === "ai-generate" ? (
-                <AIGenerate onOpenPaper={(paper) => handleOpenPaper(paper, 'ai-generate')} />
+                <AIGenerate
+                  onOpenPaper={(paper) => handleOpenPaper(paper, 'ai-generate')}
+                  onOpenSettings={() => openSettings("ai", "ai-generate")}
+                />
               ) : page === "subjects" ? (
                 <Subjects onNavigate={handleSubjectNavigate} />
               ) : page === "ai-teacher" ? (
                 <AIHub
                   onNavigate={handleAssistantNavigate}
                   assistantSubjectId={assistantSubjectId}
+                  onOpenSettings={() => openSettings("ai", "ai-teacher")}
                 />
               ) : page === "wrong-book" ? (
                 <WrongBook
@@ -1361,7 +1395,7 @@ function AppMain() {
                   }, { paperTitle: item.paper_title || '', prompt: '请讲解这道错题：指出我错在哪、正确思路是什么、再给一个变式。' })}
                 />
               ) : page === "analytics" ? (
-                <Analytics onOpenSettings={() => setPage("settings")} onStartRecommend={handleStartRecommend} onStartPractice={(category) => handleStartPractice(category, 'all', { questionCount: 10, mode: 'practice', shuffle: true })} />
+                <Analytics onOpenSettings={() => openSettings("ai")} onStartRecommend={handleStartRecommend} onStartPractice={(category) => handleStartPractice(category, 'all', { questionCount: 10, mode: 'practice', shuffle: true })} />
               ) : page === "growth" ? (
                 <GrowthCenter onOpenAchievements={() => { setActiveTab("我的成长"); setPage("achievements"); }} onStartPractice={() => { setActiveTab('题库练习'); setPage('practice'); }} />
               ) : page === "achievements" ? (
@@ -1385,6 +1419,7 @@ function AppMain() {
               <ImportPaper
                 onBack={() => setPage("practice")}
                 onImportComplete={handleImportComplete}
+                onOpenSettings={() => openSettings("ai", "import")}
               />
             </div>
           </div>
@@ -2124,7 +2159,7 @@ function OriginalHomePage({ onGoAIGenerate, onOpenPractice, onOpenWrongBook, onO
           </div>
           <div className="home-progress-list">
             {visibleCategories.length === 0 ? (
-              <div className="home-progress-empty">还没有可统计的学科</div>
+              <div className="home-progress-empty">还没有答题记录，导入题库或开始练习后会显示进度</div>
             ) : visibleCategories.map((cat) => {
               const total = Number(cat.total || 0);
               const done = Math.max(0, Number(cat.done || 0));

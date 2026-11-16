@@ -5,7 +5,7 @@ const STEPS = [
     id: "library",
     badge: "准备资料",
     title: "先把科目和资料建起来",
-    description: "新建科目后，把教材或资料拖进窗口即可上传。Markdown / TXT / PPTX 开箱可用；PDF 需要先安装解析环境，可在「设置 → 运行环境」一键安装。",
+    description: "先新建科目，再进入该科目的「资料管理」，把教材拖进主教材区域即可上传。Markdown / TXT / PPTX 开箱可用；PDF 需要 Python + MinerU 解析环境，首次安装还要下载模型，可在「设置 → 运行环境」看清缺什么、按提示安装。",
     accent: "var(--accent)",
     points: [
       "解析完成的资料会进入资料库，出卷和 AI 助教都能直接读到。",
@@ -27,7 +27,7 @@ const STEPS = [
     id: "assistant",
     badge: "AI 助教",
     title: "一个入口，两种用法",
-    description: "「答疑讲解」负责讲题和生成变式，「帮我做事」负责录题、写笔记、做分类。",
+    description: "同一个输入框，既能讲题，也能在确认后录题、写笔记、做分类。第一次使用前需要先在「设置 → AI 模型」配置一个模型和 API Key。",
     accent: "var(--success)",
     points: [
       "会改动数据的动作都会先给出确认卡片，你点了才会执行。",
@@ -65,7 +65,7 @@ function renderVisual(step) {
     return (
       <div className="onboarding-visual-plain">
         <div className="onboarding-visual-kicker">Practice</div>
-        <strong className="onboarding-visual-title">判断推理 · 20 题</strong>
+        <strong className="onboarding-visual-title">考研英语 · 20 题</strong>
         <div className="onboarding-visual-meter"><span style={{ width: "78%" }} /></div>
         <ul className="onboarding-visual-lines">
           <li>整卷模考 · 120 分钟</li>

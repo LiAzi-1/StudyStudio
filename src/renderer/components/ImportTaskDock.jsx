@@ -18,7 +18,10 @@ const STATUS_META = {
 };
 
 const DOCK_POS_KEY = 'openexam_import_dock_pos_v1';
-const DOCK_DEFAULT_POS = { right: 20, top: 84 };
+const DOCK_DEFAULT_POS = {
+  right: 20,
+  top: Math.max(84, (typeof window !== 'undefined' ? window.innerHeight : 800) - 96),
+};
 
 const clampDockPos = (pos) => {
   const maxRight = Math.max(8, window.innerWidth - 120);
@@ -121,6 +124,9 @@ export default function ImportTaskDock({ onOpenImport, onOpenReview }) {
   const running = tasks.filter((task) => task.status === 'running');
   const active = running[0];
   const finishedCount = tasks.length - running.length;
+
+  // 没有任务时不显示悬浮胶囊，避免遮挡页面右上角的操作；导入页里仍有「导入历史」入口
+  if (!tasks.length) return null;
 
   const toggleErrors = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 

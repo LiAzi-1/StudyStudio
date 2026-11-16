@@ -287,6 +287,7 @@ def convert(doc: dict) -> list[dict]:
         except (TypeError, ValueError):
             page_idx = 0
         blocks = page.get("blocks") or []
+        page_out: list[dict] = []
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -297,7 +298,7 @@ def convert(doc: dict) -> list[dict]:
             if btype == "table":
                 body = block_table_body(block)
                 if body:
-                    out.append({
+                    page_out.append({
                         "type": "table",
                         "page_idx": page_idx,
                         "bbox": norm_bbox(block.get("bbox")),
@@ -308,13 +309,24 @@ def convert(doc: dict) -> list[dict]:
                 continue
 
             if btype == "image":
-                # flash 档不含图片字节，跳过；仅保留真正的图/表题注（过滤二维码/广告等噪声）
-                footnote = ""
+                # flash 档不含图片字节，只保留图注/表注文字；没有文字时由整页兜底处理
+                texts: list[str] = []
                 for item in (block.get("content") or []):
-                    if isinstance(item, dict) and item.get("type") == "image_footnote":
-                        footnote = _extract_text(item.get("content")).strip()
-                if footnote and re.match(r"^(图|表)\s*[\d一二三四五六七八九十]", footnote):
-                    out.append({"type": "text", "page_idx": page_idx, "text": footnote})
+                    if not isinstance(item, dict):
+                        continue
+                    kind = str(item.get("type") or "")
+                    content = _extract_text(item.get("content")).strip()
+                    if not content:
+                        continue
+                    # 图注（image_caption）就是图的标题，直接保留；
+                    # 脚注（image_footnote）过滤二维码/广告等噪声，只留「图 1」「表 2」这类
+                    if kind == "image_caption":
+                        texts.append(content)
+                    elif kind == "image_footnote" and re.match(r"^(图|表)\s*[\d一二三四五六七八九十]", content):
+                        texts.append(content)
+                text = "\n".join(dict.fromkeys(texts)).strip()
+                if text:
+                    page_out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
                 continue
 
             text = block_text(block)
@@ -322,13 +334,27 @@ def convert(doc: dict) -> list[dict]:
                 continue
 
             if btype in TITLE_TYPES:
-                out.append({"type": "title", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+                page_out.append({"type": "title", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
             elif btype == "equation":
-                out.append({"type": "equation", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+                page_out.append({"type": "equation", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
             else:
                 # text / 未知类型 一律当正文
-                out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+                page_out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+
+        # 整页没有产出任何文字时，退回保留目录/旁注等被跳过块的文字，
+        # 避免「页有内容但整页消失」，导致下游按页码统计时出现未转化页
+        if not page_out:
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("type") or "") not in ("index", "aside_text"):
+                    continue
+                text = block_text(block)
+                if text:
+                    page_out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+        out.extend(page_out)
     return out
+
 
 
 # ---------------------------------------------------------------------------

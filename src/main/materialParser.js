@@ -13,6 +13,7 @@ const textbookMineru = require('./textbookMineru.js');
 const materialManager = require('./materialManager.js');
 const mineruServer = require('./mineruServer.js');
 const runtimeEnv = require('./runtimeEnv.js');
+const parseProcesses = require('./parseProcesses.js');
 const pptxParser = require('./pptxParser.js');
 
 function tmpRoot() {
@@ -40,6 +41,7 @@ function blocksToMarkdown(list) {
   return {
     markdown: pages.map((no) => `\n\n<!-- 第 ${no} 页 -->\n\n${byPage.get(no).join('\n\n')}`).join(''),
     pages: pages.length,
+    pageNumbers: pages,
   };
 }
 
@@ -114,7 +116,7 @@ async function parseSupplementary({ subjectId, id, onProgress } = {}) {
 
   function runExtractor() {
     return new Promise((resolve, reject) => {
-    const child = spawn(env.python.command, [
+    const child = parseProcesses.track(spawn(env.python.command, [
       script, safePdf,
       '--out-dir', outDir,
       '--tier', tier,
@@ -123,7 +125,7 @@ async function parseSupplementary({ subjectId, id, onProgress } = {}) {
     ], {
       env: runtimeEnv.parsingEnv({ tier }),
       windowsHide: true,
-    });
+    }));
 
     let buffered = '';
     let stderr = '';
@@ -132,6 +134,8 @@ async function parseSupplementary({ subjectId, id, onProgress } = {}) {
     let lastPage = 0;
     let failed = false;
     const parts = [];
+    // 真正产出正文的页码：完成状态与页数都按它统计，而不是按 PDF 总页数
+    const convertedPages = new Set();
 
     child.stdout.on('data', (chunk) => {
       buffered += chunk.toString();
@@ -151,6 +155,7 @@ async function parseSupplementary({ subjectId, id, onProgress } = {}) {
             const partPath = path.join(outDir, filename);
             const list = JSON.parse(fs.readFileSync(partPath, 'utf8'));
             const converted = blocksToMarkdown(Array.isArray(list) ? list : []);
+            converted.pageNumbers.forEach((no) => convertedPages.add(no));
             parts.push({ a, markdown: converted.markdown });
             lastPage = Math.max(lastPage, b);
             emit(`已解析 ${lastPage}/${total || '?'} 页`, total ? Math.min(95, 5 + Math.round((lastPage / total) * 90)) : 50);
@@ -177,10 +182,27 @@ async function parseSupplementary({ subjectId, id, onProgress } = {}) {
       try {
         parts.sort((x, y) => x.a - y.a);
         const markdown = `# ${item.name} · 补充资料转写\n\n> 辅助资料，供对照与拓展；权威依据以主教材为准。\n${parts.map((p) => p.markdown).join('')}`;
-        materialManager.finishSupplementary({ subjectId, id, markdown, pages: total || lastPage });
+        const totalPages = total || lastPage;
+        const missingPages = totalPages > 0
+          ? Array.from({ length: totalPages }, (_v, i) => i + 1).filter((no) => !convertedPages.has(no))
+          : [];
+        materialManager.finishSupplementary({
+          subjectId,
+          id,
+          markdown,
+          // pages = 实际转出正文的页数；totalPages/missingPages 记录覆盖率缺口，避免「显示解析完成但缺页」
+          pages: convertedPages.size,
+          totalPages,
+          missingPages,
+        });
         try { fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
-        emit('解析完成', 100);
-        resolve({ pages: total || lastPage, chars: markdown.length });
+        emit(
+          missingPages.length
+            ? `解析完成 · ${convertedPages.size}/${totalPages} 页，第 ${missingPages.slice(0, 12).join('、')}${missingPages.length > 12 ? '…' : ''} 页未转出文字`
+            : '解析完成',
+          100,
+        );
+        resolve({ pages: convertedPages.size, totalPages, missingPages, chars: markdown.length });
       } catch (error) {
         reject(error);
       }

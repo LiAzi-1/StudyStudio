@@ -124,7 +124,7 @@ function downloadTemplate() {
   XLSX.writeFile(wb, '题目导入模板.xlsx');
 }
 
-export default function ImportPaper({ onBack, onImportComplete }) {
+export default function ImportPaper({ onBack, onImportComplete, onOpenSettings }) {
   const [step, setStep] = useState(0); // 0: 选择方式, 1: 选择文件, 2: 配置选项, 3: 预览确认, 4: 解析结果
   const [importMode, setImportMode] = useState(null); // 'ai' | 'template'
   const [file, setFile] = useState(null);
@@ -1457,7 +1457,22 @@ export default function ImportPaper({ onBack, onImportComplete }) {
                 </div>
                 <span className="mode-title">AI 识图识题</span>
                 <span className="mode-desc">使用当前配置的视觉模型识别习题、题型、知识点并检查重复</span>
-                {!hasRecognitionConfig() && <span className="mode-tip">需先在设置中配置 AI 或 OCR</span>}
+                {!hasRecognitionConfig() && (
+                  <span className="mode-tip">
+                    需先在设置中配置 AI 或 OCR
+                    <button
+                      type="button"
+                      onClick={(event) => { event.stopPropagation(); onOpenSettings?.(); }}
+                      style={{
+                        marginLeft: 8, padding: '3px 9px', borderRadius: 6,
+                        border: '1px solid var(--warning-border)', background: 'var(--surface)',
+                        color: 'var(--warning)', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                      }}
+                    >
+                      去配置 AI
+                    </button>
+                  </span>
+                )}
               </div>
 
               <div
