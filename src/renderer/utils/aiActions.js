@@ -93,6 +93,8 @@ async function generateInventory(action, ctx) {
   if (result.resumedChapters?.length) details.push(`续跑跳过 ${result.resumedChapters.length} 章`);
   if (result.truncated) details.push('有批次被输出上限截断');
   if (result.failedChapters?.length) details.push(`${result.failedChapters.length} 章失败`);
+  // 计划时的旧笔记已被删除：本次是新建，必须让用户知道
+  if (result.notice) details.push(result.notice);
   ctx.toast?.({ title: '知识清单已更新', message: details.join('，'), tone: result.truncated || result.failedChapters?.length ? 'warning' : 'success' });
   ctx.onNavigate?.('notes');
 
@@ -109,6 +111,10 @@ async function generateInventory(action, ctx) {
     }
     if (Number.isFinite(Number(planned.requestBatches)) && actualRequestBatches !== Number(planned.requestBatches)) {
       differences.push(`计划请求 ${planned.requestBatches} 批，实际请求 ${actualRequestBatches} 批`);
+    }
+    // 计划卡按「更新旧笔记」展示，实际却新建了：属于必须如实说明的差异
+    if (result.previousNoteMissing) {
+      differences.push(result.notice || '原清单已被删除，已按缓存内容新建');
     }
     const plannedChapters = Array.isArray(planned.selectedChapters) ? planned.selectedChapters.length : null;
     if (plannedChapters !== null && Number(result.chapterCount) !== plannedChapters) {

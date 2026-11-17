@@ -798,6 +798,9 @@ function planKnowledgeInventory(options = {}) {
 async function generateKnowledgeInventory(options = {}) {
   const { subjectId, settings, signal, onProgress, keepExisting = true, forceRerun = false } = options;
   const prepared = prepareInventoryPlan({ ...options, persistStructure: true });
+  // 规划阶段把旧清单读进了内存，真正的写入仍要拿到数据库句柄；
+  // 这里显式 require，避免依赖规划函数内部的局部声明（0.6.8 曾因此 ReferenceError）。
+  const database = require('./database.js');
   const {
     subject,
     sourceInfo,
@@ -1146,8 +1149,12 @@ async function generateKnowledgeInventory(options = {}) {
   const normalized = normalizeMath(rawContent);
 
   const snapshotPath = writeSnapshot(subjectId, existing?.content || '');
+  // 计划到保存之间旧笔记可能已在笔记页被删除：以数据库现状为准，
+  // 删了就新建，绝不拿旧 id 去覆盖不存在的（或别人的）笔记。
+  const existingNote = existing?.id ? database.getNote(existing.id) : null;
+  const previousNoteMissing = Boolean(existing?.id) && !existingNote;
   const note = database.saveNote({
-    id: existing?.id || undefined,
+    id: existingNote?.id || undefined,
     title: `知识清单 · ${subject.name}`,
     content: normalized.text,
     tags: [subject.name, '知识清单'],
@@ -1193,11 +1200,15 @@ async function generateKnowledgeInventory(options = {}) {
     entries: stats.entries,
     elapsedMs,
     chars: normalized.text.length,
-    message: `知识清单已写入：${selected.length} 章 / ${totalBatches} 批，${normalized.text.length} 字，耗时 ${(elapsedMs / 1000).toFixed(1)}s`,
+    message: `知识清单已写入：${selected.length} 章 / ${totalBatches} 批，${normalized.text.length} 字，耗时 ${(elapsedMs / 1000).toFixed(1)}s${previousNoteMissing ? '；原清单已被删除，已按缓存内容新建' : ''}`,
   });
 
   return {
     noteId: note?.id || null,
+    // 计划时读到的旧笔记若在保存前被删除，这里会新建一篇，并如实提示
+    noteCreated: !existingNote,
+    previousNoteMissing,
+    notice: previousNoteMissing ? '原清单已被删除，已按缓存内容新建' : '',
     chars: normalized.text.length,
     elapsedMs,
     concurrency,
