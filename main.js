@@ -209,6 +209,13 @@ ipcMain.handle("question:updateAnswer", (event, input = {}) => {
   return database.updateQuestionAnswer(input.questionId, input);
 });
 
+// 缺答案题目让 AI 先给参考答案：只返回结果，是否入库由用户在答案面板确认
+ipcMain.handle("question:aiAnswer", async (event, input = {}) => {
+  const settings = input.settings || null;
+  if (!settings?.apiKey) return { success: false, error: "还没配置 AI 模型，请先到「设置 → AI 模型」完成配置" };
+  return aiService.solveQuestionAnswer(settings, input.question || {});
+});
+
 ipcMain.handle("question:addAnswerImage", (event, input = {}) => {
   const questionId = String(input.questionId || "").trim();
   if (!questionId) return { success: false, error: "题目 ID 不能为空" };
@@ -1395,6 +1402,7 @@ ipcMain.handle("aiChat:chat", async (event, payload = {}) => {
       messages: payload.messages,
       images: payload.images,
       subjectId: payload.subjectId,
+      sessionId: payload.sessionId,
       questionContext: payload.questionContext,
     });
   } catch (error) {
@@ -1516,6 +1524,7 @@ ipcMain.handle("aiChat:chatStreamStart", async (event, payload = {}) => {
         messages: payload.messages,
         images: payload.images,
         subjectId: payload.subjectId,
+        sessionId: payload.sessionId,
         questionContext: payload.questionContext,
         signal: abortController.signal,
         onDelta: (delta) => emitAiChatEvent(sender, { requestId, type: "delta", delta }),
@@ -1553,7 +1562,43 @@ ipcMain.handle("aiChat:readImage", (event, relativePath) => aiAssets.readImage(r
 ipcMain.handle("aiChat:imageStats", (event, sessionId) => aiAssets.stats(sessionId));
 ipcMain.handle("aiChat:cleanupImages", () => aiAssets.cleanupAll());
 ipcMain.handle("aiChat:updateMessageMeta", (event, { messageId, meta } = {}) => database.updateAIChatMessageMeta(messageId, meta));
-ipcMain.handle("aiChat:setSessionContext", (event, { sessionId, context } = {}) => database.updateAIChatSessionContext(sessionId, context));
+ipcMain.handle("aiChat:setSessionContext", (event, { sessionId, context } = {}) => {
+  // 发新消息时用题目上下文覆盖 context_json，但要保留工作台写入的分析记忆
+  try {
+    const prev = database.getAIChatSession(sessionId);
+    const prevContext = prev?.context_json ? JSON.parse(prev.context_json) : null;
+    if (prevContext?.analysis && context && typeof context === 'object' && !Array.isArray(context)) {
+      return database.updateAIChatSessionContext(sessionId, { ...context, analysis: prevContext.analysis });
+    }
+  } catch { /* 解析失败按原逻辑覆盖 */ }
+  return database.updateAIChatSessionContext(sessionId, context);
+});
+
+/** 学科分析工作台：把结果并入会话上下文，供后续追问引用 */
+ipcMain.handle("aiChat:saveSessionAnalysis", (event, { sessionId, analysis } = {}) => {
+  try {
+    return database.saveAIChatSessionAnalysis(sessionId, analysis);
+  } catch (error) {
+    return { success: false, error: error?.message || '保存分析结果失败' };
+  }
+});
+
+/** 题目级分析缓存：同一道题在新会话里重开工作台时直接复用，避免重新读题 / 重新求解 */
+ipcMain.handle("analysis:getCache", (event, payload = {}) => {
+  try {
+    return database.getQuestionAnalysisCache(payload || {});
+  } catch (error) {
+    return { success: false, cache: null, error: error?.message || '读取分析缓存失败' };
+  }
+});
+
+ipcMain.handle("analysis:saveCache", (event, payload = {}) => {
+  try {
+    return database.saveQuestionAnalysisCache(payload || {});
+  } catch (error) {
+    return { success: false, error: error?.message || '写入分析缓存失败' };
+  }
+});
 
 /* --------------------------------------------- 科目体系（学习平台） */
 
@@ -1604,6 +1649,9 @@ ipcMain.handle("plugins:extract", (event, payload = {}) => analysisPlugins.extra
 ipcMain.handle("plugins:solve", (event, payload = {}) => analysisPlugins.solve(payload));
 
 ipcMain.handle("plugins:explain", (event, payload = {}) => analysisPlugins.explain(payload));
+
+/** 工作台左下角答疑：就当前相量图关系追问，可返回补充显示关系 */
+ipcMain.handle("plugins:assist", (event, payload = {}) => analysisPlugins.assist(payload || {}));
 
 /** 科目学习数据统计（题库/错题，含预置科目的分类联动） */
 ipcMain.handle("subject:stats", (event, id) => {

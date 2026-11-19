@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("openexam", {
   // 题目答案：文字/图片补充（图片落盘到 question-assets，只在库里存引用）
   question: {
     updateAnswer: (input = {}) => ipcRenderer.invoke("question:updateAnswer", input),
+    aiAnswer: (input = {}) => ipcRenderer.invoke("question:aiAnswer", input),
     addAnswerImage: (input = {}) => ipcRenderer.invoke("question:addAnswerImage", input),
     removeAnswerImage: (input = {}) => ipcRenderer.invoke("question:removeAnswerImage", input),
   },
@@ -208,6 +209,7 @@ contextBridge.exposeInMainWorld("openexam", {
     cleanupImages: () => ipcRenderer.invoke("aiChat:cleanupImages"),
     updateMessageMeta: (input = {}) => ipcRenderer.invoke("aiChat:updateMessageMeta", input),
     setSessionContext: (input = {}) => ipcRenderer.invoke("aiChat:setSessionContext", input),
+    saveSessionAnalysis: (input = {}) => ipcRenderer.invoke("aiChat:saveSessionAnalysis", input),
   },
 
   // 手机扫码传图（临时局域网服务，用完即关）
@@ -287,6 +289,13 @@ contextBridge.exposeInMainWorld("openexam", {
     extract: (payload) => ipcRenderer.invoke("plugins:extract", payload),
     solve: (payload) => ipcRenderer.invoke("plugins:solve", payload),
     explain: (payload) => ipcRenderer.invoke("plugins:explain", payload),
+    assist: (payload) => ipcRenderer.invoke("plugins:assist", payload),
+  },
+
+  // 题目级分析缓存：同题复用分析结果（不重复读题 / 不重复求解）
+  analysis: {
+    getCache: (payload = {}) => ipcRenderer.invoke("analysis:getCache", payload),
+    saveCache: (payload = {}) => ipcRenderer.invoke("analysis:saveCache", payload),
   },
 
   // 运行环境：MinerU / Python 真实检测 + 一键安装，Obsidian 安装状态

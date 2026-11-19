@@ -400,11 +400,21 @@ function AppMain() {
     setPage("settings");
   };
 
-  /** 打开学科分析插件工作台；seed 可带题干与图片，进入后自动识别一次 */
+  /** 打开学科分析插件工作台；seed 可带题干、图片、会话 id，进入后自动识别一次 */
   const openAnalysis = (pluginId, seed = null, returnPage = "ai-teacher") => {
     if (!pluginId) return;
     setAnalysisLaunch({ pluginId, seed: seed || null, returnPage });
     setPage("analysis");
+  };
+
+  /** 从工作台回到发起会话：恢复会话 + 可选预填提问 */
+  const returnToAssistantFromAnalysis = (prompt = "") => {
+    try {
+      const sessionId = String(analysisLaunch?.seed?.sessionId || "").trim();
+      if (sessionId) localStorage.setItem("openexam_ai_return_session", sessionId);
+      if (prompt) localStorage.setItem("openexam_ai_prefill", JSON.stringify({ prompt }));
+    } catch { /* 忽略 */ }
+    setPage("ai-teacher");
   };
 
   const onboarding = (
@@ -489,6 +499,8 @@ function AppMain() {
         answer: question.answer || question.correct_answer || '',
         analysis: question.analysis || '',
         userAnswer: extra.userAnswer || question.user_answer || '',
+        // 题目所属科目：问 AI 新建会话时写入 subject_id，便于按学科检索
+        subjectId: extra.subjectId || question.subject_id || '',
         updatedAt: new Date().toISOString(),
       }));
       localStorage.setItem('openexam_ai_autofill', JSON.stringify({
@@ -503,7 +515,6 @@ function AppMain() {
   const goAskAI = (question, extra = {}) => {
     writeAIContext(question, extra);
     setActiveTab('');
-    setAiTab('teacher');
     setPage('ai-teacher');
   };
 
@@ -1398,8 +1409,10 @@ function AppMain() {
                   seed={analysisLaunch.seed}
                   onBack={() => {
                     if (analysisLaunch.returnPage === "settings") openSettings("plugins");
+                    else if (analysisLaunch.returnPage === "ai-teacher") returnToAssistantFromAnalysis("");
                     else setPage(analysisLaunch.returnPage || "ai-teacher");
                   }}
+                  onAskInChat={(prompt) => returnToAssistantFromAnalysis(prompt)}
                   onOpenSettings={(section) => openSettings(section || "plugins", "ai-teacher")}
                 />
               ) : page === "wrong-book" ? (
@@ -1414,7 +1427,7 @@ function AppMain() {
                     answer: item.answer || item.correct_answer,
                     analysis: item.analysis,
                     user_answer: item.user_answer,
-                  }, { paperTitle: item.paper_title || '', prompt: '请讲解这道错题：指出我错在哪、正确思路是什么、再给一个变式。' })}
+                  }, { paperTitle: item.paper_title || '', subjectId: item.subject_id || item.subjectId || '', prompt: '请讲解这道错题：指出我错在哪、正确思路是什么、再给一个变式。' })}
                 />
               ) : page === "analytics" ? (
                 <Analytics onOpenSettings={() => openSettings("ai")} onStartRecommend={handleStartRecommend} onStartPractice={(category) => handleStartPractice(category, 'all', { questionCount: 10, mode: 'practice', shuffle: true })} />
@@ -2031,19 +2044,29 @@ function OriginalHomePage({ onGoAIGenerate, onOpenPractice, onOpenWrongBook, onO
     const loadData = async () => {
       if (!window.openexam?.db) return;
       try {
-        const subjects = ['math', 'english', 'politics', 'major'];
-        const [practiceStats, categoryStats, daily, today, ...distributionRows] = await Promise.all([
+        const [practiceStats, categoryStats, daily, today] = await Promise.all([
           window.openexam.db.getPracticeStats(),
           window.openexam.db.getCategoryStats(),
           window.openexam.db.getDailyStats(7),
           window.openexam.db.getTodayStats?.() || Promise.resolve({ total: 0 }),
-          ...subjects.map((subject) => window.openexam.db.getSubCategoryStats?.(subject) || Promise.resolve([])),
         ]);
         setStats(practiceStats);
         setCategories(categoryStats);
         setDailyStats(daily);
         setTodayStats(today || { total: 0 });
-        setSubjectDistributions(Object.fromEntries(subjects.map((subject, index) => [subject, Array.isArray(distributionRows[index]) ? distributionRows[index] : []])));
+        // 子分类分布要覆盖自建科目（key 为 subject:<id>），否则它们只能回退显示「待分类」
+        const distributionCategories = Array.from(new Set([
+          'math', 'english', 'politics', 'major',
+          ...(Array.isArray(categoryStats) ? categoryStats : [])
+            .filter((item) => Number(item?.total) > 0 && item?.category)
+            .map((item) => item.category),
+        ]));
+        const distributionRows = await Promise.all(
+          distributionCategories.map((category) => window.openexam.db.getSubCategoryStats?.(category) || Promise.resolve([]))
+        );
+        setSubjectDistributions(Object.fromEntries(distributionCategories.map((category, index) => (
+          [category, Array.isArray(distributionRows[index]) ? distributionRows[index] : []]
+        ))));
       } catch (err) {
         console.error('加载统计数据失败:', err);
       }
@@ -2197,10 +2220,12 @@ function OriginalHomePage({ onGoAIGenerate, onOpenPractice, onOpenWrongBook, onO
               const rows = subjectDistributions[subject.key] || [];
               const actualRows = rows.filter((row) => Number(row.count) > 0);
               const slices = actualRows.length ? actualRows : (total > 0 ? [{ subCategory: 'general', count: total }] : []);
+              // 以切片合计为分母：统计口径万一与卡片题量有偏差，也不会画出超过 360° 或留缺口
+              const sliceTotal = slices.reduce((sum, row) => sum + Number(row.count || 0), 0);
               let cursor = 0;
               const stops = slices.map((row, index) => {
                 const start = cursor;
-                cursor += total > 0 ? (Number(row.count) / total) * 360 : 0;
+                cursor += sliceTotal > 0 ? (Number(row.count) / sliceTotal) * 360 : 0;
                 return `${[subject.color, '#8ea8ef', '#75bea8', '#d9a15e', '#aa94df'][index % 5]} ${start}deg ${cursor}deg`;
               });
               const gradient = stops.length ? `conic-gradient(${stops.join(', ')})` : 'conic-gradient(var(--accent-soft-bg) 0deg 360deg)';

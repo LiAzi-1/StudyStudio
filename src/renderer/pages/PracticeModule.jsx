@@ -641,7 +641,7 @@ export default function PracticeModule({ onStartPractice, onImport, onHistory, o
                             type="button"
                             className="summary-btn outline"
                             style={{ height: 26, padding: '0 10px', fontSize: 11 }}
-                            onClick={() => onOpenPaper?.(paper.id)}
+                            onClick={() => onReviewPaper?.(paper)}
                           >
                             看题
                           </button>

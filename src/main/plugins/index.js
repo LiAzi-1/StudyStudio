@@ -309,10 +309,16 @@ function buildChatPluginPrompt(subjectId) {
     return `### ${plugin.name}（pluginId: ${plugin.id}）
 - 说明：${plugin.description}
 - 输入：${capabilities}
-- 它负责把题目转成结构化中间结果，并由代码完成计算。你不能自己计算，也不能给出最终数值。
-- 当用户要求分析这类题目时，在回复末尾只输出：
+- 它负责把题目转成结构化中间结果，并由代码完成计算和画图。你不能自己计算，也不能给出最终数值或代替它画图。
+- 下面任一情况（针对某道具体题目时），必须调用这个插件，不要只用文字作答：
+  1) 用户要求「画相量图 / 画 E0、I 的轨迹 / 定性分析」，尤其是同步电机、异步电机的电动势与电压相量关系、功率因数角、功角、有功 / 无功 / 励磁调节；
+  2) 用户贴出电路图、单线图、接线图，要求化简、计算、分析；
+  3) 用户贴出电气类题目并明确说「用插件 / 打开分析工作台 / 画图分析」。
+- 定性题（题目没有具体数值、只要判断变化趋势）同样要调用：插件内置隐极同步发电机调节的分步相量图模板，不需要你再让用户补数值。
+- 当前会话已锁定题目时（system 里有「本次会话锁定的题目」），直接用锁定的题干调用，不要让用户重复贴题。
+- 输出动作前可以用一两句话说明将打开该插件；正文不要给出完整推导、结论数值或自画的相量图。
+- 需要调用时，在回复末尾只输出：
 <action>{"type":"run_analysis_plugin","pluginId":"${plugin.id}"}</action>
-- 输出动作前可以用一两句话说明将打开该插件；不要给出结果数值。
 - 题目明显不属于该插件范围时，不要输出这个动作。`;
   });
   return `## 学科分析插件（本会话已匹配，可用）
@@ -439,7 +445,7 @@ ${schemas}
 通用硬约束（优先级最高）：
 1. 你只负责读题、读图、结构化；不做计算、不写解题步骤、不给出结论数值。
 2. 看不清、有歧义时，把问题写进 ambiguities；宁可不答，也不要猜。
-3. 题目是电路图 → 用 kind=circuit；是单线图 / 电力系统接线图 → 用 kind=one-line。
+3. 题目是电路图 → 用 kind=circuit；是单线图 / 电力系统接线图 → 用 kind=one-line；要求画相量图、画 E0 / I 轨迹或做电机定性分析 → 用 kind=phasor（没有具体数值时 mode=qualitative）。
 4. 输出必须是能被 JSON.parse 直接解析的对象，不要出现注释、尾逗号或额外文字。`;
 }
 
@@ -542,7 +548,7 @@ async function extract({ pluginId, text, images, settings } = {}) {
   };
 }
 
-function solve({ pluginId, ir, ignoreAmbiguities = false } = {}) {
+function solve({ pluginId, ir, ignoreAmbiguities = false, sweep } = {}) {
   const found = findPlugin(pluginId);
   if (!found) return { success: false, error: '插件不存在' };
   const { plugin } = found;
@@ -550,7 +556,7 @@ function solve({ pluginId, ir, ignoreAmbiguities = false } = {}) {
   try {
     const engine = engineFor(plugin, String(ir?.kind || '').trim());
     const normalized = { ...ir, kind: engine.kind, ambiguities: normalizeAmbiguities(ir?.ambiguities) };
-    const result = engine.solve(normalized, { ignoreAmbiguities });
+    const result = engine.solve(normalized, { ignoreAmbiguities, sweep });
     return { success: true, kind: engine.kind, result };
   } catch (error) {
     return { success: false, error: error?.message || String(error) };
@@ -564,10 +570,12 @@ function explainPayload(ir, result) {
       ? { ok: false, errors: result?.errors || [] }
       : {
         ok: true,
+        qualitative: Boolean(result?.qualitative),
+        scenarioLabel: result?.scenarioLabel || '',
         port: result?.port || null,
         nodeVoltages: result?.nodeVoltages || [],
         elements: result?.elements || [],
-        steps: (result?.steps || []).map((step) => ({ title: step.title, value: step.value, formula: step.formula })),
+        steps: (result?.steps || []).map((step) => ({ title: step.title, detail: step.detail, value: step.value, formula: step.formula })),
         buses: result?.buses || [],
         branches: result?.branches || [],
         loads: result?.loads || [],
@@ -615,6 +623,146 @@ ${explainPayload(ir, result)}`;
   return { success: true, text: String(reply.content || '').trim(), model: resolved.settings.model || '' };
 }
 
+/* ------------------------------------------------------------ 相量图答疑 */
+
+function assistContext({ question, ir, result }) {
+  const phasors = (Array.isArray(result?.phasors) ? result.phasors : Array.isArray(ir?.phasors) ? ir.phasors : [])
+    .map((item) => `${item?.label || ''}：${item?.magnitude ?? ''}${item?.unit || ''} ∠${item?.angle ?? ''}°${item?.dashed ? '（调节前，虚线）' : ''}`)
+    .filter((line) => line.length > 3)
+    .slice(0, 20);
+  const payload = {
+    question: String(question || '').slice(0, 2000),
+    scenarioLabel: result?.scenarioLabel || '',
+    qualitative: Boolean(result?.qualitative),
+    normalized: Boolean(result?.normalized),
+    summary: (result?.summary || []).slice(0, 10),
+    phasors,
+    guides: (result?.guides || []).map((guide) => String(guide?.label || guide?.type || '')).filter(Boolean).slice(0, 8),
+    notice: result?.notice || '',
+  };
+  return JSON.stringify(payload, null, 1).slice(0, 12000);
+}
+
+function sanitizeAdditions(raw) {
+  const list = Array.isArray(raw?.phasors) ? raw.phasors : [];
+  const phasors = list.map((item, index) => {
+    const quantity = String(item?.quantity || '').toLowerCase() === 'current' ? 'current' : 'voltage';
+    const magnitude = Number(item?.magnitude);
+    const angle = Number(item?.angle);
+    const label = String(item?.label || '').trim().slice(0, 20);
+    if (!label || !Number.isFinite(magnitude) || !Number.isFinite(angle)) return null;
+    if (magnitude <= 0 || magnitude > 3) return null;
+    return {
+      id: `AI${index + 1}`,
+      label,
+      quantity,
+      magnitude: Math.round(magnitude * 1000) / 1000,
+      unit: '',
+      angle: Math.round(angle * 10) / 10,
+      real: Math.round(magnitude * Math.cos((angle * Math.PI) / 180) * 1000) / 1000,
+      imag: Math.round(magnitude * Math.sin((angle * Math.PI) / 180) * 1000) / 1000,
+      source: 'assistant',
+      verified: false,
+      dashed: true,
+    };
+  }).filter(Boolean).slice(0, 6);
+
+  const guideList = Array.isArray(raw?.guides) ? raw.guides : [];
+  const guides = guideList.map((guide) => {
+    const type = String(guide?.type || '').trim();
+    const label = String(guide?.label || '').trim().slice(0, 80);
+    if (!['vline', 'hline', 'circle'].includes(type)) return null;
+    if (type === 'vline') {
+      const x = Number(guide?.x);
+      if (!Number.isFinite(x)) return null;
+      return { type, x: Math.round(x * 1000) / 1000, label, source: 'assistant' };
+    }
+    if (type === 'hline') {
+      const y = Number(guide?.y);
+      if (!Number.isFinite(y)) return null;
+      return { type, y: Math.round(y * 1000) / 1000, label, source: 'assistant' };
+    }
+    const cx = Number(guide?.cx);
+    const cy = Number(guide?.cy);
+    const r = Number(guide?.r);
+    if (![cx, cy, r].every(Number.isFinite) || r <= 0) return null;
+    return { type, cx, cy, r: Math.round(r * 1000) / 1000, label, source: 'assistant' };
+  }).filter(Boolean).slice(0, 4);
+
+  const notes = (Array.isArray(raw?.notes) ? raw.notes : [])
+    .map((note) => String(note || '').trim().slice(0, 100))
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return { phasors, guides, notes };
+}
+
+async function assist({ pluginId, question, message, history, ir, result, settings } = {}) {
+  const found = findPlugin(pluginId);
+  if (!found) return { success: false, error: '插件不存在' };
+  const { plugin, state } = found;
+  if (plugin.invalid) return { success: false, error: '插件清单无效，无法运行' };
+  if (!isEnabled(plugin, state)) return { success: false, error: '插件未启用' };
+
+  const ask = String(message || '').trim();
+  if (!ask) return { success: false, error: '请输入要追问的内容' };
+
+  const resolved = resolveChatSettings(settings, false);
+  if (resolved.error) return { success: false, error: resolved.error };
+
+  const system = `你是电机学 / 电路相量图的答疑助手，正在配合理科分析插件「${plugin.name}」讲解一张已经画好的相量图。
+用户会在看完图后就相量之间的关系追问，例如「电枢电流与励磁电流是什么关系」「增大有功时其他量怎么动」。
+
+硬约束（最高优先级）：
+1. 以给定的「当前图与分析结果」为准，不得改写其中已有的数值 / 结论，也不得与图上的相量关系矛盾。
+2. 只回答概念关系与变化趋势，用中文，可少量使用 LaTeX（$...$）。回答控制在 300 字以内，先直接回答问题，再补充一句依据。
+3. 如需在图上补充显示关系，可以在 additions 里给出：
+   - phasors：示意相量，label 用相量名（如「İ_f」「ΔE₀」），quantity 是 voltage 或 current，magnitude 用 0.05–3 的归一化相对值（U 基准 = 1），angle 用角度；这些只作示意，不要写成题目数值。
+   - guides：补充轨迹，type 是 vline（需 x）/ hline（需 y）/ circle（需 cx、cy、r），坐标与相量图同一套归一化坐标。
+   - notes：一句图外标注，最多 4 条，每条不超过 60 字。
+4. 不需要补充图形时，additions 里三个数组都返回空数组。不要为了显得完整而硬加。
+5. 只输出一个 JSON 对象，不要 Markdown 代码块、不要解释 JSON 之外的内容：
+{"answer":"...","additions":{"phasors":[],"guides":[],"notes":[]}}`;
+
+  const recent = (Array.isArray(history) ? history : [])
+    .filter((item) => item?.role === 'user' || item?.role === 'assistant')
+    .slice(-6)
+    .map((item) => ({ role: item.role, content: String(item.content || '').slice(0, 1200) }));
+
+  const content = `【当前图与分析结果（以此为准）】
+${assistContext({ question, ir, result })}
+
+【用户追问】
+${ask}`;
+
+  const aiService = require('../ai/index.js');
+  const reply = await aiService.complete(resolved.settings, {
+    system,
+    messages: [...recent, { role: 'user', content }],
+    maxTokens: 1200,
+  });
+  if (!reply?.success) return { success: false, error: `答疑失败：${reply?.error || '未知错误'}` };
+
+  let parsed = null;
+  try {
+    parsed = aiService.parseAIJson(reply.content);
+  } catch {
+    // 模型没按 JSON 返回时，至少把正文当答案，不让用户这一问白花
+    const text = stripCodeFences(reply.content);
+    if (!text) return { success: false, error: '答疑没有返回内容' };
+    return { success: true, answer: text.slice(0, 4000), additions: { phasors: [], guides: [], notes: [] }, model: resolved.settings.model || '' };
+  }
+
+  const answer = String(parsed?.answer || '').trim();
+  if (!answer) return { success: false, error: '答疑没有返回有效回答' };
+  return {
+    success: true,
+    answer: answer.slice(0, 4000),
+    additions: sanitizeAdditions(parsed?.additions),
+    model: resolved.settings.model || '',
+  };
+}
+
 module.exports = {
   attach,
   initForTest,
@@ -631,6 +779,7 @@ module.exports = {
   extract,
   solve,
   explain,
+  assist,
   ENGINES,
   ENGINE_IDS,
 };

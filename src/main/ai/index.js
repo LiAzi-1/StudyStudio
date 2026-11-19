@@ -1974,6 +1974,88 @@ async function gradeEssay(settings, payload) {
   }
 }
 
+/** 缺答案题目让 AI 先给参考答案：只依据题干与选项作答，不编造出处 */
+const SOLVE_ANSWER_SYSTEM = `你是试题作答助手。用户会给你一道题（可能来自教材或资料，也可能只有题干）。
+只根据题目本身作答，不要引用题目里没有出现的教材页码、章节或原文。
+
+输出要求：
+- 只输出一个 JSON 对象，不要 Markdown 代码块或额外解释。
+- 客观题（single / multiple / judge）：answer 只写选项字母，如 "A"、"AB"；判断题用 "A" 表示正确、"B" 表示错误。
+- 填空 / 主观题：answer 写参考答案，analysis 写解题步骤与评分要点。
+- 没有把握时不要硬编：在 analysis 里说明哪一步不确定，answer 给出最可能的答案。
+
+格式：{"answer":"参考答案","analysis":"简要解析"}`;
+
+function formatSolveOptions(options) {
+  const list = Array.isArray(options) ? options : [];
+  return list.map((option, index) => {
+    const fallbackKey = String.fromCharCode(65 + (index % 26));
+    if (typeof option === 'string') return `${fallbackKey}. ${option}`;
+    const key = String(option?.key || fallbackKey).toUpperCase();
+    return `${key}. ${String(option?.content || '')}`;
+  }).filter((line) => line.replace(/^[A-H]\.\s*/, '').trim()).join('\n');
+}
+
+function buildSolveAnswerPrompt(question = {}) {
+  const type = String(question.type || 'single').toLowerCase();
+  const typeLabel = {
+    single: '单选', multiple: '多选', judge: '判断', fill: '填空', subjective: '主观',
+  }[type] || type;
+  const content = String(question.content || question.contentHtml || question.content_html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .trim();
+  const material = String(question.material || question.material_html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .trim()
+    .slice(0, 1200);
+  const options = formatSolveOptions(question.options);
+  return [
+    `题型：${typeLabel}`,
+    material ? `材料：\n${material}` : '',
+    `题干：\n${content}`,
+    options ? `选项：\n${options}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+async function solveQuestionAnswer(settings, payload = {}) {
+  try {
+    if (!String(settings?.apiKey || '').trim()) {
+      return { success: false, error: '还没配置 AI 模型，请先到「设置 → AI 模型」完成配置' };
+    }
+    const question = payload || {};
+    const content = String(question.content || question.contentHtml || question.content_html || '')
+      .replace(/<[^>]+>/g, ' ')
+      .trim();
+    if (!content) return { success: false, error: '题目内容为空，无法生成答案' };
+
+    const result = await complete(structuredSettings(settings), {
+      system: SOLVE_ANSWER_SYSTEM,
+      messages: [{ role: 'user', content: buildSolveAnswerPrompt(question) }],
+      maxTokens: 2048,
+    });
+    if (!result?.success) return { success: false, error: result?.error || 'AI 生成答案失败' };
+
+    const parsed = extractJSONObject(result.content, ['answer']);
+    const answer = String(parsed?.answer || '').trim();
+    if (!answer) {
+      return {
+        success: false,
+        error: result.truncated ? '模型输出被截断，请重试' : '模型没有返回可解析的答案，请重试',
+      };
+    }
+    return {
+      success: true,
+      answer,
+      analysis: String(parsed?.analysis || '').trim(),
+      truncated: Boolean(result.truncated),
+    };
+  } catch (error) {
+    return { success: false, error: compactError(error) };
+  }
+}
+
 const ESSAY_OCR_SYSTEM = `你是考研专业课主观题录入助手。从图片里原样提取材料和题目，不要改写、不要总结、不要补充。只输出 JSON。`;
 
 /** 从图片里提取专业课主观题：材料 / 题干 / 要求 / 字数 */
@@ -2194,6 +2276,7 @@ module.exports = {
   matchQuestionAnswers,
   classifyQuestions,
   gradeEssay,
+  solveQuestionAnswer,
   recognizeEssay,
   gradeHandwrittenAnswer,
   testConnection,

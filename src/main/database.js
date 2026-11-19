@@ -563,6 +563,19 @@ function initDatabase() {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- 题目级分析缓存：同一道题换个会话再分析时直接复用，不必重新读题 / 重新求解
+    CREATE TABLE IF NOT EXISTS question_analysis_cache (
+      question_id TEXT NOT NULL,
+      plugin_id TEXT NOT NULL,
+      subject_id TEXT,
+      analysis_json TEXT,
+      ir_json TEXT,
+      result_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (question_id, plugin_id)
+    );
+
     -- AI 聊天消息
     CREATE TABLE IF NOT EXISTS ai_chat_messages (
       id TEXT PRIMARY KEY,
@@ -1829,27 +1842,22 @@ function getSmartRecommend(options = {}) {
 }
 
 // 获取子分类统计
+/**
+ * 与 getCategoryStats 共用「有效分类」口径：自建科目的题归到 subject:<id>，
+ * 不再同时算进「专业课」；否则饼图分段与卡片题量会对不上。
+ */
 function getSubCategoryStats(category) {
   const raw = String(category || '');
-  const customId = raw.startsWith('subject:') ? raw.slice(8) : '';
-  if (customId) {
-    return db.prepare(`
-      SELECT q.sub_category as subCategory, COUNT(*) as count
-      FROM questions q JOIN papers p ON q.paper_id = p.id
-      WHERE p.subject_id = ?
-      GROUP BY q.sub_category
-      ORDER BY count DESC, q.sub_category ASC
-    `).all(customId);
-  }
+  if (!raw) return [];
   return db.prepare(`
-    SELECT
-      sub_category as subCategory,
-      COUNT(*) as count
-    FROM questions
-    WHERE category = ?
-    GROUP BY sub_category
-    ORDER BY count DESC, sub_category ASC
-  `).all(category);
+    SELECT q.sub_category as subCategory, COUNT(*) as count
+    FROM questions q
+    ${CATEGORY_JOINS_SQL}
+    WHERE q.category IS NOT NULL AND TRIM(q.category) != ''
+      AND ${EFFECTIVE_CATEGORY_SQL} = ?
+    GROUP BY q.sub_category
+    ORDER BY count DESC, q.sub_category ASC
+  `).all(raw);
 }
 
 function repairQuestionTaxonomy() {
@@ -3480,8 +3488,93 @@ function searchAIChatSessions(query, limit = 100) {
   `).all(pattern, pattern, pattern, count);
 }
 
-function setAIChatSessionPinned(sessionId, pinned) {
+function getAIChatSession(sessionId) {
   const id = String(sessionId || '').trim();
+  if (!id) return null;
+  return db.prepare('SELECT * FROM ai_chat_sessions WHERE id = ?').get(id) || null;
+}
+
+/**
+ * 把学科分析工作台的结果并入会话上下文（保留原有锁定题目）。
+ * 后续提问由 buildSystem 读取这份 analysis，避免重新读题。
+ */
+function saveAIChatSessionAnalysis(sessionId, analysis) {
+  const id = String(sessionId || '').trim();
+  if (!id || !analysis || typeof analysis !== 'object') {
+    return { success: false, error: '会话或分析结果为空' };
+  }
+  const row = db.prepare('SELECT context_json FROM ai_chat_sessions WHERE id = ?').get(id);
+  if (!row) return { success: false, error: '会话不存在' };
+  let context = {};
+  try { context = row.context_json ? JSON.parse(row.context_json) : {}; } catch { context = {}; }
+  if (!context || typeof context !== 'object' || Array.isArray(context)) context = {};
+  context.analysis = { ...analysis, savedAt: new Date().toISOString() };
+  updateAIChatSessionContext(id, context);
+  return { success: true, sessionId: id };
+}
+
+function safeParseJSON(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+/**
+ * 题目级分析缓存读取。
+ * pluginId 省略时取这道题最近一次的分析（不同插件之间不混用结果）。
+ */
+function getQuestionAnalysisCache({ questionId, pluginId } = {}) {
+  const qid = String(questionId || '').trim();
+  if (!qid) return { success: false, cache: null, error: '缺少题目 id' };
+  const pid = String(pluginId || '').trim();
+  const row = pid
+    ? db.prepare('SELECT * FROM question_analysis_cache WHERE question_id = ? AND plugin_id = ?').get(qid, pid)
+    : db.prepare('SELECT * FROM question_analysis_cache WHERE question_id = ? ORDER BY updated_at DESC LIMIT 1').get(qid);
+  if (!row) return { success: true, cache: null };
+  return {
+    success: true,
+    cache: {
+      questionId: row.question_id,
+      pluginId: row.plugin_id,
+      subjectId: row.subject_id || '',
+      analysis: safeParseJSON(row.analysis_json),
+      ir: safeParseJSON(row.ir_json),
+      result: safeParseJSON(row.result_json),
+      updatedAt: row.updated_at || '',
+    },
+  };
+}
+
+/** 题目级分析缓存写入：求解成功即可调用，后续同题追问 / 重开工作台直接复用 */
+function saveQuestionAnalysisCache({ questionId, pluginId, subjectId, analysis, ir, result } = {}) {
+  const qid = String(questionId || '').trim();
+  const pid = String(pluginId || '').trim();
+  if (!qid || !pid) return { success: false, error: '缺少题目或插件标识' };
+  if (!result || typeof result !== 'object') return { success: false, error: '没有可缓存的分析结果' };
+  let resultJson = '';
+  try { resultJson = JSON.stringify(result); } catch { return { success: false, error: '分析结果无法序列化' }; }
+  // 缓存只服务于「同题复用」，超过 512KB 说明结构异常，宁可不存也不撑大数据库
+  if (resultJson.length > 512 * 1024) return { success: false, error: '分析结果过大，未写入缓存' };
+  db.prepare(`
+    INSERT INTO question_analysis_cache (question_id, plugin_id, subject_id, analysis_json, ir_json, result_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(question_id, plugin_id) DO UPDATE SET
+      subject_id = excluded.subject_id,
+      analysis_json = excluded.analysis_json,
+      ir_json = excluded.ir_json,
+      result_json = excluded.result_json,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    qid,
+    pid,
+    String(subjectId || ''),
+    analysis ? JSON.stringify(analysis) : '',
+    ir ? JSON.stringify(ir) : '',
+    resultJson,
+  );
+  return { success: true };
+}
+
+function setAIChatSessionPinned(sessionId, pinned) {  const id = String(sessionId || '').trim();
   if (!id) return null;
   if (pinned) {
     db.prepare('UPDATE ai_chat_sessions SET pinned_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
@@ -4095,6 +4188,10 @@ module.exports = {
   saveUserProfile,
   createAIChatSession,
   getAIChatSessions,
+  getAIChatSession,
+  saveAIChatSessionAnalysis,
+  getQuestionAnalysisCache,
+  saveQuestionAnalysisCache,
   getAIChatMessages,
   addAIChatMessage,
   updateAIChatMessageMeta,

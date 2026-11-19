@@ -17,6 +17,12 @@ import {
 
 const ACTIVE_SESSION_KEY = 'openexam_ai_active_session';
 const QUESTION_CONTEXT_KEY = 'openexam_question_context';
+// 从学科分析工作台返回时恢复发起会话（一次性）
+const RETURN_SESSION_KEY = 'openexam_ai_return_session';
+// 从工作台带回的预填问题（只填输入框，不新建会话）
+const PREFILL_KEY = 'openexam_ai_prefill';
+// 题目页「问 AI」写入的待提问内容：合并成 AIConversation 后曾漏掉消费，导致点按钮只跳页
+const AUTOFILL_KEY = 'openexam_ai_autofill';
 const DRAFT_KEY = 'openexam_ai_draft_v1';
 
 const SUGGESTIONS = [
@@ -118,10 +124,15 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   const streamTextRef = useRef('');
   const listRef = useRef(null);
   const fileRef = useRef(null);
+  const inputRef = useRef(null);
+  // 「问 AI」带入问题后聚焦输入框，让用户直接按 Enter 发送
+  const focusInputRef = useRef(false);
   const planBuildingRef = useRef(new Set());
   const pendingRef = useRef(null);
   const stickRef = useRef(true);
   const searchQueryRef = useRef('');
+  // 「问 AI」带过来的题目所属科目：创建会话时直接写进 subject_id
+  const pendingSubjectRef = useRef('');
 
   useEffect(() => {
     try {
@@ -217,22 +228,100 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      await loadSubjects();
-      const rows = await loadSessions();
-      if (cancelled) return;
-      const saved = localStorage.getItem(ACTIVE_SESSION_KEY);
-      const target = rows.find((item) => item.id === saved) || rows[0];
-      if (target) await selectSession(target.id, rows);
-      // 从题目页“问 AI”带过来的上下文
+
+    // 先同步消费「题目页问 AI」写入的 localStorage，再做 IPC 刷新。
+    // 之前放在 await 之后，用户在加载期间按回车会丢掉题目上下文（第一轮答「没收到题目」）。
+    let pendingAsk = null;
+    try {
+      const rawAsk = localStorage.getItem(AUTOFILL_KEY);
+      if (rawAsk) {
+        pendingAsk = JSON.parse(rawAsk);
+        localStorage.removeItem(AUTOFILL_KEY);
+      }
+    } catch { /* 忽略 */ }
+
+    // 工作台「返回会话 / 记入笔记」带回的一次性恢复信息
+    let returnSessionId = '';
+    let prefillPrompt = '';
+    try {
+      returnSessionId = String(localStorage.getItem(RETURN_SESSION_KEY) || '').trim();
+      const rawPrefill = localStorage.getItem(PREFILL_KEY);
+      if (rawPrefill) {
+        prefillPrompt = String(JSON.parse(rawPrefill)?.prompt || '');
+      }
+    } catch { /* 忽略 */ }
+    try {
+      localStorage.removeItem(RETURN_SESSION_KEY);
+      localStorage.removeItem(PREFILL_KEY);
+    } catch { /* 忽略 */ }
+
+    // 只有确实带着「待提问」时才恢复题目上下文；否则保持空白新会话，避免挂上上次的旧题
+    if (pendingAsk?.prompt) {
+      // 题库新提问优先：清掉工作台带回的会话恢复信息
+      returnSessionId = '';
+      prefillPrompt = '';
+      let pendingContext = null;
       try {
         const raw = localStorage.getItem(QUESTION_CONTEXT_KEY);
-        const parsed = raw ? JSON.parse(raw) : null;
-        if (parsed?.questionId) setPinnedContext((prev) => prev || parsed);
+        pendingContext = raw ? JSON.parse(raw) : null;
       } catch { /* 忽略 */ }
+
+      if (pendingContext?.questionId) {
+        setPinnedContext(pendingContext);
+        localStorage.removeItem(QUESTION_CONTEXT_KEY);
+        const nextSubject = String(pendingContext.subjectId || pendingContext.subject_id || '').trim();
+        if (nextSubject) {
+          pendingSubjectRef.current = nextSubject;
+          setSubjectId(nextSubject);
+        }
+      }
+
+      // 从题库跳过来必须是一次独立提问：清掉当前会话与消息，发送时新建会话
+      setActiveId('');
+      activeIdRef.current = '';
+      setMessages([]);
+      setStreamText('');
+      streamTextRef.current = '';
+      setEditing(null);
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+      setInput(String(pendingAsk.prompt));
+      focusInputRef.current = true;
+      if (!isAssistantConfigured()) {
+        toast({
+          title: 'AI 还没配置',
+          message: '题目已带入，但讲题需要模型：请到「设置 → AI 模型」配置「老师」或「识图」角色。',
+          tone: 'warning',
+        });
+      }
+    }
+
+    (async () => {
+      await loadSubjects();
+      // 只刷新左侧会话列表，不自动恢复上一次会话：打开助教页默认就是空白新会话
+      const rows = await loadSessions();
+      if (cancelled) return;
+      if (returnSessionId) {
+        const target = rows.find((item) => item.id === returnSessionId);
+        if (target) {
+          await selectSession(returnSessionId, rows);
+          if (target.subject_id) setSubjectId(target.subject_id);
+        }
+      }
+      if (prefillPrompt) {
+        setInput(prefillPrompt);
+        focusInputRef.current = true;
+      }
     })();
     return () => { cancelled = true; };
-  }, [loadSessions, loadSubjects, selectSession]);
+  }, [loadSessions, loadSubjects, selectSession, toast]);
+
+  // 预填问题后把焦点交给输入框；等 React 把 value 写进 textarea 再聚焦
+  useEffect(() => {
+    if (!focusInputRef.current) return;
+    focusInputRef.current = false;
+    const timer = setTimeout(() => inputRef.current?.focus?.(), 60);
+    return () => clearTimeout(timer);
+  }, [input]);
 
   useEffect(() => {
     if (incomingSubjectId) setSubjectId(incomingSubjectId);
@@ -442,12 +531,16 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     setLoading(true);
     loadingRef.current = true;
 
+    // 会话已有绑定科目时以会话为准：插件注入、题库回写都依赖这个 id，
+    // 否则打开历史会话但没有重新选科目时，模型看不到学科分析插件。
+    const sessionSubjectId = sessions.find((item) => item.id === sessionId)?.subject_id || subjectId || null;
     const res = await window.openexam.aiChat.chatStreamStart({
       requestId,
+      sessionId,
       settings: getAISettings(),
       messages: history,
       images: sendImages.map(({ base64, mimeType }) => ({ base64, mimeType })),
-      subjectId: subjectId || null,
+      subjectId: sessionSubjectId,
       questionContext: pinnedContext || null,
     });
     if (!res?.success) {
@@ -459,19 +552,59 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
       toast({ title: '发送失败', message: res?.error || '未知错误', tone: 'danger' });
     }
     await refreshList();
-  }, [pinnedContext, refreshList, subjectId, toast]);
+  }, [pinnedContext, refreshList, sessions, subjectId, toast]);
 
   const ensureSession = useCallback(async (firstText) => {
     if (activeIdRef.current) return activeIdRef.current;
-    const title = String(firstText || '').replace(/\s+/g, ' ').trim().slice(0, 24) || '新会话';
-    const session = await window.openexam.db.createAIChatSession({ title, subjectId: subjectId || null });
+    // 从题目页过来时用「第 N 题 · 试卷名」做标题，比统一的提问模板更好检索
+    const title = pinnedContext
+      ? `第${pinnedContext.index || '?'}题 · ${String(pinnedContext.paperTitle || '答疑').trim()}`.slice(0, 40)
+      : (String(firstText || '').replace(/\s+/g, ' ').trim().slice(0, 24) || '新会话');
+    // 科目：优先左侧选择器（用户在界面上可改），其次题目上下文带来的科目
+    const sessionSubjectId = subjectId || pendingSubjectRef.current || null;
+    const session = await window.openexam.db.createAIChatSession({ title, subjectId: sessionSubjectId });
+    pendingSubjectRef.current = '';
     const rows = await loadSessions();
     setActiveId(session.id);
     activeIdRef.current = session.id;
     localStorage.setItem(ACTIVE_SESSION_KEY, session.id);
     setSessions(rows.length ? rows : [session]);
     return session.id;
-  }, [loadSessions, subjectId]);
+  }, [loadSessions, pinnedContext, subjectId]);
+
+  /**
+   * 打开分析工作台前先把会话落实：
+   * 从题库「问 AI」过来时可能还没发过消息、没有会话，如果直接打开工作台，
+   * 求解结果就没有会话可绑定，这道题也就不会被记录。
+   * 这里先建会话并把锁定题目写进 context，再带着 sessionId / questionId 进入工作台。
+   */
+  const openAnalysisWithSession = useCallback(async (pluginIdentifier, seedBase = {}) => {
+    if (!onOpenAnalysis) return;
+    let sessionId = activeIdRef.current || activeId || '';
+    const question = pinnedContext;
+    const seedText = String(seedBase?.text || '').trim();
+    if (!sessionId && (question?.questionId || seedText)) {
+      try {
+        sessionId = await ensureSession(seedText || String(question?.content || ''));
+        if (question?.questionId) {
+          await window.openexam.aiChat.setSessionContext({ sessionId, context: question });
+          localStorage.removeItem(QUESTION_CONTEXT_KEY);
+        }
+      } catch (error) {
+        toast({ title: '创建会话失败', message: error?.message || String(error), tone: 'danger' });
+      }
+    }
+    const sessionSubjectId = sessions.find((item) => item.id === sessionId)?.subject_id
+      || subjectId
+      || pinnedContext?.subjectId
+      || '';
+    onOpenAnalysis(pluginIdentifier, {
+      ...seedBase,
+      sessionId,
+      subjectId: sessionSubjectId,
+      questionId: String(question?.questionId || ''),
+    });
+  }, [activeId, ensureSession, onOpenAnalysis, pinnedContext, sessions, subjectId, toast]);
 
   const addImages = useCallback(async (files) => {
     const incoming = Array.from(files || []).slice(0, MAX_ASSISTANT_IMAGES);
@@ -661,6 +794,7 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   }, [stop]);
 
   const newSession = useCallback(async () => {
+    pendingSubjectRef.current = '';
     setActiveId('');
     activeIdRef.current = '';
     setMessages([]);
@@ -954,6 +1088,7 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
                 <button type="button" title="删除" onClick={(event) => { event.stopPropagation(); deleteSession(session); }} style={{ border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: 12 }}>×</button>
               </div>
               <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
+                {session.subject_id ? `${subjects.find((item) => item.id === session.subject_id)?.name || '已绑定科目'} · ` : ''}
                 {session.source === 'imported' ? '导入 · ' : ''}
                 {session.message_count ? `${session.message_count} 条消息` : '还没有消息'}
                 {session.pinned_at ? ' · 已置顶' : ''}
@@ -1171,7 +1306,14 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
                                 <button
                                   type="button"
                                   style={BTN(true)}
-                                  onClick={() => onOpenAnalysis?.(action.pluginId, { text: String(user?.content || ''), images: [] })}
+                                  onClick={() => openAnalysisWithSession(action.pluginId, {
+                                    text: [String(pinnedContext?.content || ''), String(user?.content || '')]
+                                      .filter(Boolean)
+                                      .join('\n\n'),
+                                    images: [],
+                                    sessionId: activeIdRef.current || activeId,
+                                    subjectId: sessions.find((item) => item.id === (activeIdRef.current || activeId))?.subject_id || subjectId || '',
+                                  })}
                                 >打开分析工作台</button>
                               ) : (
                                 <span style={{ fontSize: 11, color: 'var(--muted)' }}>该插件在当前科目不可用（未匹配或已禁用）</span>
@@ -1281,9 +1423,11 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
                 <button
                   key={plugin.id}
                   type="button"
-                  onClick={() => onOpenAnalysis(plugin.id, {
-                    text: input || String(pinnedContext?.content || ''),
+                  onClick={() => openAnalysisWithSession(plugin.id, {
+                    text: [String(pinnedContext?.content || ''), String(input || '')].filter(Boolean).join('\n\n'),
                     images,
+                    sessionId: activeIdRef.current || activeId,
+                    subjectId: sessions.find((item) => item.id === (activeIdRef.current || activeId))?.subject_id || subjectId || '',
                   })}
                   style={{ ...BTN(false), padding: '4px 9px', fontSize: 11 }}
                   title={plugin.description}
@@ -1323,6 +1467,7 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
               }}
             />
             <textarea
+              ref={inputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onPaste={async (event) => {

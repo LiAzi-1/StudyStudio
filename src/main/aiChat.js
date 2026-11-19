@@ -83,8 +83,7 @@ const SUMMARY_ONLY_SCOPE_PROMPT = `## 本轮输出范围（最高优先级，覆
 - 如果本轮调用 write_notes，笔记正文同样只写上述范围，不要写成一节课、学习计划或知识清单。
 - 这一条优先于 Good Learning 方法论中关于每日学习、完整例题、举一反三和收尾建议的要求。`;
 
-function userMessageText(message) {
-  const raw = message?.content ?? message?.text;
+function userMessageText(message) {  const raw = message?.content ?? message?.text;
   if (typeof raw === 'string') return raw;
   if (!Array.isArray(raw)) return '';
   return raw
@@ -95,7 +94,92 @@ function userMessageText(message) {
     .join('\n');
 }
 
-function buildSystem({ database, subjectId, messages, questionContext }) {
+/** 读取会话里保存的学科分析结果（工作台写入 context_json.analysis） */
+function readSessionAnalysis(database, sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id) return null;
+  try {
+    const session = database.getAIChatSession?.(id);
+    const context = session?.context_json ? JSON.parse(session.context_json) : null;
+    const analysis = context?.analysis;
+    return analysis && typeof analysis === 'object' ? analysis : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把工作台分析结果压成 System 里的一段记忆。
+ * 后续追问直接引用，不再让模型重新读题；只有用户明确要求时才允许写笔记。
+ */
+function buildAnalysisMemoryBlock(analysis) {
+  if (!analysis || typeof analysis !== 'object') return '';
+  const question = String(analysis.question || '').trim().slice(0, 2500);
+  const summary = (Array.isArray(analysis.summary) ? analysis.summary : [])
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .slice(0, 10);
+  const steps = (Array.isArray(analysis.steps) ? analysis.steps : [])
+    .map((step) => ({
+      title: String(step?.title || '').trim().slice(0, 80),
+      detail: String(step?.detail || '').trim().slice(0, 600),
+      formula: String(step?.formula || '').trim().slice(0, 400),
+      value: String(step?.value || '').trim().slice(0, 400),
+    }))
+    .filter((step) => step.title || step.detail || step.formula || step.value)
+    .slice(0, 12);
+  const phasors = (Array.isArray(analysis.phasors) ? analysis.phasors : [])
+    .map((item) => `${item.label || ''} = ${item.magnitude ?? ''}${item.unit || ''} ∠${item.angle ?? ''}°`)
+    .filter((line) => line.trim().length > 3)
+    .slice(0, 16);
+  const guides = (Array.isArray(analysis.guides) ? analysis.guides : []).map((line) => String(line || '').trim()).filter(Boolean).slice(0, 8);
+
+  const body = [];
+  body.push(`## 本会话已保存的学科分析结果（可直接引用）`);
+  body.push('用户刚才在学科分析工作台分析过下面这道题，结果由插件读取/计算，属于本会话的既成事实。后续追问以这里为准，不要重新读题或重新画图。');
+  if (question) body.push(`\n题干：\n${question}`);
+  if (analysis.scenarioLabel) body.push(`\n分析方式：${String(analysis.scenarioLabel).slice(0, 160)}`);
+  if (summary.length) body.push(`\n关键结论：\n${summary.map((line) => `- ${line}`).join('\n')}`);
+  if (steps.length) {
+    body.push('\n分析步骤：');
+    steps.forEach((step, index) => {
+      const head = `第 ${index + 1} 步${step.title ? ` · ${step.title}` : ''}`;
+      const lines = [head];
+      if (step.detail) lines.push(`  说明：${step.detail}`);
+      if (step.formula) lines.push(`  依据：${step.formula}`);
+      if (step.value) lines.push(`  结论：${step.value}`);
+      body.push(lines.join('\n'));
+    });
+  }
+  if (phasors.length) body.push(`\n关键相量（图中数值）：\n${phasors.map((line) => `- ${line}`).join('\n')}`);
+  if (guides.length) body.push(`\n端点轨迹：\n${guides.map((line) => `- ${line}`).join('\n')}`);
+  if (analysis.notice) body.push(`\n图示说明：${String(analysis.notice).slice(0, 500)}`);
+
+  let text = body.join('\n');
+  if (text.length > 9000) text = `${text.slice(0, 9000)}\n…（分析记忆已截断）`;
+  text += `\n\n使用规则：
+- 用户问「刚才那张图 / 第几步 / 为什么这样变」时，直接引用上面的步骤、结论和相量，不要重新读题，也不要重复整段分析。
+- 只有用户明确说「记入笔记 / 存到笔记 / 写成笔记」时，才输出 write_notes 动作（kind=summary）：标题围绕本题，content 用 Markdown 整理题干、分析步骤和结论。未得到用户确认前，不要声称已经写入，也不要在正文里假装写好了。
+- 用户没有提到这份分析时，不要主动展开它。`;
+  return text;
+}
+
+/**
+ * 会话里没有分析记忆时，回落到「同一道题」的分析缓存。
+ * 这样换个会话再问同一道题，也能直接引用已有分析，不用重新读题 / 重新求解。
+ */
+function readQuestionAnalysis(database, questionContext) {
+  const questionId = String(questionContext?.questionId || '').trim();
+  if (!questionId) return null;
+  try {
+    const cache = database.getQuestionAnalysisCache?.({ questionId })?.cache;
+    return cache?.analysis && typeof cache.analysis === 'object' ? cache.analysis : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildSystem({ database, subjectId, messages, questionContext, sessionId }) {
   const context = assistantAgent.buildContextSnapshot(database);
   const subjectBlock = buildSubjectBlock(subjectId, { messages });
   let system = assistantAgent.buildSystemPrompt(context, subjectBlock.text);
@@ -112,6 +196,12 @@ function buildSystem({ database, subjectId, messages, questionContext }) {
   }
   if (questionContext) {
     system += `\n\n## 本次会话锁定的题目\n用户正在追问下面这道题。讲解与动作都要围绕它，不要把上下文丢掉；如果用户换了新题，以新题为准。\n\n${buildQuestionContextPrompt(questionContext)}`;
+  }
+  const analysisBlock = buildAnalysisMemoryBlock(
+    readSessionAnalysis(database, sessionId) || readQuestionAnalysis(database, questionContext),
+  );
+  if (analysisBlock) {
+    system += `\n\n${analysisBlock}`;
   }
 
   const lastUser = [...(Array.isArray(messages) ? messages : [])]
@@ -344,19 +434,19 @@ function finishResult({ result, citations, route, subjectId }) {
   };
 }
 
-async function chat({ settings, database, messages, images, subjectId, questionContext }) {
+async function chat({ settings, database, messages, images, subjectId, sessionId, questionContext }) {
   const hasImages = assistantAgent.hasImageMessages(messages) || (Array.isArray(images) && images.length > 0);
   const route = resolveUnifiedRoute(settings, hasImages);
-  const { system, citations } = buildSystem({ database, subjectId, messages, questionContext });
+  const { system, citations } = buildSystem({ database, subjectId, messages, questionContext, sessionId });
   const payload = buildMessages({ messages, images, questionContext });
   const result = await aiService.chat(route.settings, payload, { system, maxTokens: 8192 });
   return finishResult({ result, citations, route, subjectId });
 }
 
-async function chatStream({ settings, database, messages, images, subjectId, questionContext, onDelta, signal }) {
+async function chatStream({ settings, database, messages, images, subjectId, sessionId, questionContext, onDelta, signal }) {
   const hasImages = assistantAgent.hasImageMessages(messages) || (Array.isArray(images) && images.length > 0);
   const route = resolveUnifiedRoute(settings, hasImages);
-  const { system, citations } = buildSystem({ database, subjectId, messages, questionContext });
+  const { system, citations } = buildSystem({ database, subjectId, messages, questionContext, sessionId });
   const payload = buildMessages({ messages, images, questionContext });
   const result = await aiService.chatStream(route.settings, payload, {
     system,

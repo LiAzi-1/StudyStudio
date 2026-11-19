@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import RichQuestionContent from './RichQuestionContent.jsx';
 import PhoneUploadDialog from './PhoneUploadDialog.jsx';
 import { useDialog } from './DialogProvider.jsx';
+import { getRoleSettings, isRoleConfigured } from '../store/aiSettings.js';
 import { getAnswerImages, isAnswerSupplemented } from '../utils/questionAnswer.js';
 
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -15,6 +16,9 @@ const S = {
     fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
   },
   primary: { borderColor: 'var(--warning-border, var(--accent-border-soft))', background: 'var(--warning-soft, var(--accent-soft-bg))', color: 'var(--warning, var(--accent))' },
+  ai: { borderColor: 'var(--accent-border-soft)', background: 'var(--accent-soft-bg)', color: 'var(--accent)' },
+  aiBadge: { color: 'var(--info)', background: 'var(--info-soft)' },
+  aiNote: { fontSize: 11, lineHeight: 1.7, color: 'var(--muted)' },
   notice: { fontSize: 11, lineHeight: 1.7, color: 'var(--muted)' },
 };
 
@@ -36,6 +40,8 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(() => String(question?.answer || '').toString());
   const [busy, setBusy] = useState(false);
+  const [aiDraft, setAiDraft] = useState(null);
+  const [aiBusy, setAiBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [phoneOpen, setPhoneOpen] = useState(false);
   const [preview, setPreview] = useState('');
@@ -48,6 +54,7 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
     setDraft(String(question?.answer || '').toString());
     setEditing(false);
     setNotice('');
+    setAiDraft(null);
     setPhoneOpen(false);
     setPreview('');
   }, [question?.id]);
@@ -61,6 +68,65 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
   const hasAnswer = Boolean(textAnswer.trim()) || images.length > 0;
   const supplemented = isAnswerSupplemented(question);
   const questionId = String(question?.id || '').trim();
+  const answerSource = String(question?.answer_source || question?.answerSource || '');
+  const isAIGenerated = /^ai[_-]/i.test(answerSource);
+
+  const generateAIAnswer = async () => {
+    if (!questionId || aiBusy) return;
+    if (!window.openexam?.question?.aiAnswer) {
+      setNotice('当前版本不支持 AI 生成答案，请重启应用后再试。');
+      return;
+    }
+    const configured = isRoleConfigured('teacher') || isRoleConfigured('assistant');
+    if (!configured) {
+      const message = '还没配置 AI 模型。请先到「设置 → AI 模型」配置「老师」或「识图」角色，再回来生成答案。';
+      setNotice(message);
+      toast({ title: 'AI 还没配置', message, tone: 'warning' });
+      return;
+    }
+    setAiBusy(true);
+    setNotice('');
+    try {
+      const settings = isRoleConfigured('teacher') ? getRoleSettings('teacher') : getRoleSettings('assistant');
+      const result = await window.openexam.question.aiAnswer({ settings, question });
+      if (!result?.success) {
+        setNotice(result?.error || 'AI 生成答案失败');
+        return;
+      }
+      setAiDraft({ answer: String(result.answer || ''), analysis: String(result.analysis || '') });
+    } catch (error) {
+      setNotice(error?.message || 'AI 生成答案失败');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const adoptAIAnswer = async () => {
+    if (!questionId || !aiDraft) return;
+    if (!window.openexam?.question?.updateAnswer) {
+      setNotice('当前版本不支持保存答案，请重启应用后再试。');
+      return;
+    }
+    setBusy(true);
+    setNotice('');
+    try {
+      const updated = await window.openexam.question.updateAnswer({
+        questionId,
+        answer: aiDraft.answer,
+        ...(aiDraft.analysis ? { analysis: aiDraft.analysis } : {}),
+        answerSource: 'ai_generated',
+        answerStatus: 'ai_unverified',
+        answerConfidence: 0.6,
+      });
+      applyUpdated(updated);
+      setAiDraft(null);
+      toast({ message: '已保存 AI 生成的答案，标注为「未经核对」', tone: 'success' });
+    } catch (error) {
+      setNotice(error?.message || '保存 AI 答案失败');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const applyUpdated = (updated) => {
     if (!updated) return;
@@ -197,6 +263,9 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
         {supplemented && hasAnswer ? (
           <span style={{ ...S.badge, color: 'var(--success, #047857)', background: 'var(--success-soft, #d1fae5)' }}>答案已补充</span>
         ) : null}
+        {isAIGenerated && hasAnswer ? (
+          <span style={{ ...S.badge, ...S.aiBadge }}>AI 生成 · 未经核对</span>
+        ) : null}
         {images.length > 0 ? (
           <span style={{ ...S.badge, color: 'var(--accent)', background: 'var(--accent-soft-bg)' }}>{images.length} 张图片答案</span>
         ) : null}
@@ -210,6 +279,17 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
         />
         {editable ? (
           <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexWrap: 'wrap' }}>
+            {!hasAnswer ? (
+              <button
+                type="button"
+                style={{ ...S.button, ...S.ai }}
+                onClick={generateAIAnswer}
+                disabled={busy || aiBusy}
+                title="由 AI 依据题干生成参考答案，保存后标注为未经核对"
+              >
+                {aiBusy ? 'AI 生成中…' : 'AI 生成答案'}
+              </button>
+            ) : null}
             <button
               type="button"
               style={S.button}
@@ -272,12 +352,47 @@ export default function QuestionAnswerPanel({ question, onUpdated, editable = tr
               ))}
             </div>
           ) : null}
+          {isAIGenerated ? (
+            <div style={S.aiNote}>
+              这是 AI 生成的参考答案，未经人工核对；与你手动补充的答案（标记「答案已补充」）分开记录。判分或背诵前请先对照原题 / 资料核对。
+            </div>
+          ) : null}
         </div>
       ) : (
         <div style={{ fontSize: 12, lineHeight: 1.8, color: 'var(--muted)' }}>
-          这道题还没有答案。可以直接输入文字答案，也可以拍照 / 上传图片，或点「手机扫码传图」用手机拍下自己的解答。
+          这道题还没有答案。可以让 AI 先给一个参考答案（会标注「AI 生成 · 未经核对」），也可以自己输入文字答案、拍照 / 上传图片，或点「手机扫码补答案」用手机拍下自己的解答。
         </div>
       )}
+
+      {aiDraft ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 10, border: '1px dashed var(--accent-border-soft)', background: 'var(--accent-soft-bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ ...S.badge, ...S.aiBadge }}>AI 生成 · 未经核对</span>
+            <span style={S.aiNote}>保存后会与手动补充的答案分开标记，确认可用后再采用。</span>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginBottom: 4 }}>参考答案</div>
+            <RichQuestionContent value={aiDraft.answer} className="tb-inline tb-answer-text" />
+          </div>
+          {aiDraft.analysis ? (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginBottom: 4 }}>AI 解析</div>
+              <RichQuestionContent value={aiDraft.analysis} className="rich-question-analysis" />
+            </div>
+          ) : null}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" style={{ ...S.button, ...S.ai }} onClick={adoptAIAnswer} disabled={busy}>
+              {busy ? '保存中…' : '采用并保存'}
+            </button>
+            <button type="button" style={S.button} onClick={generateAIAnswer} disabled={aiBusy}>
+              {aiBusy ? '生成中…' : '重新生成'}
+            </button>
+            <button type="button" style={S.button} onClick={() => setAiDraft(null)} disabled={busy}>
+              放弃
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {editing ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--line)', background: 'var(--surface-soft)' }}>

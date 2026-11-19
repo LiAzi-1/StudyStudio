@@ -43,3 +43,9 @@ data/original/image_loop.json
 
 # 别的项目的图误放进来过，别再收进来
 /assets/spain-*
+
+# 本地测试 / 缓存 / 跑批临时产物
+.e2e-mock/
+__pycache__/
+scripts/obsidian_vault_cleanup_plan.json
+scripts/textbook-pagemap.json

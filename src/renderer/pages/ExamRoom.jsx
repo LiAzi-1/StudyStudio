@@ -459,18 +459,43 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
         index: currentIndex + 1,
         total: questions.length,
         userAnswer: formatAnswerForDisplay(answers[currentQuestion?.id], currentQuestion?.type),
+        // 试卷所属科目：AI 助教据此给新会话打学科标记
+        subjectId: paper?.subject_id || paper?.subjectId || config?.subjectId || '',
         prompt: intent === 'subjective_grade'
           ? '请批改我的主观题答案：先复述评分标准或参考答案，再逐点判断我的答案是否覆盖关键得分点，指出错误和遗漏，给出可执行的修改建议。不要只给分数。'
           : undefined,
       });
       return;
     }
+    // 没接 AI 入口时不能静默失败：把题目与问题存下来，并明确告诉用户从哪里进入
     try {
+      if (currentQuestion) {
+        localStorage.setItem('openexam_question_context', JSON.stringify({
+          questionId: currentQuestion.id || '',
+          paperTitle: paper?.title || config?.title || '',
+          index: currentIndex + 1,
+          total: questions.length,
+          category: currentQuestion.category || '',
+          subCategory: currentQuestion.sub_category || currentQuestion.subCategory || '',
+          content: currentQuestion.content || '',
+          options: Array.isArray(currentQuestion.options) ? currentQuestion.options : [],
+          answer: currentQuestion.answer || '',
+          analysis: currentQuestion.analysis || '',
+          userAnswer: formatAnswerForDisplay(answers[currentQuestion?.id], currentQuestion?.type),
+          subjectId: paper?.subject_id || paper?.subjectId || config?.subjectId || '',
+          updatedAt: new Date().toISOString(),
+        }));
+      }
       localStorage.setItem('openexam_ai_autofill', JSON.stringify({
         prompt: '请讲解这道题：拆解考点、说明为什么选这个答案、再给一个类似练习。',
         at: Date.now(),
       }));
     } catch (error) {}
+    showAlert({
+      title: '暂时无法直接打开 AI 助教',
+      message: '当前页面没有接入 AI 助教入口。请从左侧导航打开「AI 助教」，刚才的题目和问题已经带过去了。',
+      tone: 'warning',
+    });
   };
 
   if (!currentQuestion || questions.length === 0) {
@@ -636,7 +661,7 @@ export default function ExamRoom({ paperId, questions: propQuestions, config, re
             ))}
           </div>
 
-          <button onClick={handleAskAI} title="问 AI" style={{ padding: '5px 12px', borderRadius: 16, border: '1px solid var(--accent-border-soft)', background: 'var(--accent-soft-bg)', color: 'var(--accent)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+          <button onClick={() => handleAskAI('explain')} title="问 AI" style={{ padding: '5px 12px', borderRadius: 16, border: '1px solid var(--accent-border-soft)', background: 'var(--accent-soft-bg)', color: 'var(--accent)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
             问 AI
           </button>
 

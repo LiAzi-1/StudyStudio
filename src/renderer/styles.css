@@ -8217,32 +8217,35 @@ button {
 
 .home-subject-pies {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 窗口变窄时自动退化为单列，给每个饼图留出可读宽度，而不是硬挤成两列 */
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
   min-width: 0;
 }
 
 .home-subject-pie-card {
   min-width: 0;
-  padding: 14px;
+  padding: 12px;
 }
 
 .home-subject-pie-card .home-dist-body {
-  gap: 12px;
-  min-height: 98px;
+  gap: 10px 14px;
+  min-height: 92px;
+  flex-wrap: wrap;
 }
 
 .home-subject-pie-card .home-donut {
-  width: 82px;
-  height: 82px;
+  width: 78px;
+  height: 78px;
 }
 
 .home-subject-pie-card .home-donut-inner {
-  width: 57px;
-  height: 57px;
+  width: 54px;
+  height: 54px;
 }
 
 .home-subject-pie-card .home-dist-legend {
+  flex: 1 1 110px;
   gap: 5px;
   min-width: 0;
 }

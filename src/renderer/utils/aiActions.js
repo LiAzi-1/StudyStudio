@@ -433,6 +433,12 @@ async function buildActionPlan(action, ctx = {}) {
       const notes = action.notes || [];
       plan.target = `科目：${subject?.name || '未绑定科目'}｜笔记库`;
       plan.scope = [`新建 ${notes.length} 篇笔记${notes.length ? `：${notes.map((note) => note.title).filter(Boolean).slice(0, 6).join('、')}` : ''}`];
+      notes.slice(0, 4).forEach((note) => {
+        const content = String(note?.content || '').replace(/\s+/g, ' ').trim();
+        const preview = content.slice(0, 140);
+        plan.scope.push(`《${note?.title || '未命名笔记'}》正文预览：${preview}${content.length > 140 ? '…' : ''}`);
+      });
+      plan.scope.push('确认后才会写入；只新建，不修改已有笔记');
       plan.write = ['笔记库：新建笔记（不会覆盖已有笔记）', '保存后同步到 Obsidian'];
       plan.cost = ['本地写入，不调用模型'];
       plan.warnings = ['只新建、不覆盖；要改已有笔记请用「修改笔记」'];

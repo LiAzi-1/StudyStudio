@@ -9,6 +9,8 @@ import React, { useMemo } from 'react';
  * 图上的数值来自求解结果，没有结果时只显示元件标称值。
  */
 
+import { useCallback, useEffect, useRef, useState } from 'react';
+
 const WIDTH = 520;
 const HEIGHT = 340;
 
@@ -295,11 +297,14 @@ function OneLineView({ ir, result }) {
   );
 }
 
-function PhasorView({ ir, result }) {
+function PhasorView({ ir, result, compact = false }) {
   const width = 500;
   const height = 380;
   const origin = { x: 250, y: 200 };
   const radius = 140;
+  const guides = Array.isArray(ir?.guides) && ir.guides.length
+    ? ir.guides
+    : (Array.isArray(result?.guides) ? result.guides : []);
   const phasors = (result?.phasors?.length ? result.phasors : (Array.isArray(ir?.phasors) ? ir.phasors : []))
     .map((item) => {
       const magnitude = Number(item.magnitude);
@@ -312,34 +317,137 @@ function PhasorView({ ir, result }) {
     })
     .filter((item) => item.magnitude > 0);
   const reference = result?.reference || ir?.reference || { label: '参考相量', angle: 0 };
-  const maxMagnitude = Math.max(1, ...phasors.map((item) => item.magnitude));
-  const scale = radius / maxMagnitude;
 
-  const toPoint = (magnitude, angle) => {
-    const radians = (angle * Math.PI) / 180;
+  const radiansOf = (angle) => (angle * Math.PI) / 180;
+  // 每条相量都换算成「起点 + 向量终点」的直角坐标，jİX_s 这类首尾相接的相量才画得对
+  const segments = phasors.map((item) => {
+    const start = item.start && Number.isFinite(Number(item.start.real)) && Number.isFinite(Number(item.start.imag))
+      ? { real: Number(item.start.real), imag: Number(item.start.imag) }
+      : { real: 0, imag: 0 };
+    const vector = { real: item.magnitude * Math.cos(radiansOf(item.angle)), imag: item.magnitude * Math.sin(radiansOf(item.angle)) };
     return {
-      x: origin.x + magnitude * scale * Math.cos(radians),
-      y: origin.y - magnitude * scale * Math.sin(radians),
+      ...item,
+      start,
+      end: { real: start.real + vector.real, imag: start.imag + vector.imag },
+      vector,
     };
-  };
+  });
 
-  if (!phasors.length) {
+  const extents = [1];
+  segments.forEach((item) => {
+    extents.push(Math.hypot(item.start.real, item.start.imag), Math.hypot(item.end.real, item.end.imag));
+  });
+  guides.forEach((guide) => {
+    if (guide.type === 'vline') extents.push(Math.abs(Number(guide.x) || 0));
+    else if (guide.type === 'hline') extents.push(Math.abs(Number(guide.y) || 0));
+    else if (guide.type === 'circle') {
+      const cx = Number(guide.cx) || 0;
+      const cy = Number(guide.cy) || 0;
+      const r = Number(guide.r) || 0;
+      extents.push(Math.hypot(cx, cy) + r);
+    }
+  });
+  const maxExtent = Math.max(...extents.filter((value) => Number.isFinite(value)), 1);
+  const scale = radius / maxExtent;
+
+  const toPoint = (real, imag) => ({
+    x: origin.x + real * scale,
+    y: origin.y - imag * scale,
+  });
+
+  if (!segments.length) {
     return <div style={{ padding: 20, fontSize: 12, color: 'var(--muted)' }}>还没有相量数据：先识别题目或手动补一个相量。</div>;
   }
 
-  const refPoint = toPoint(maxMagnitude, reference.angle || 0);
+  const refPoint = toPoint(Math.cos(radiansOf(reference.angle || 0)) * maxExtent, Math.sin(radiansOf(reference.angle || 0)) * maxExtent);
+
+  // 标签避让：先给每个箭头找候选位置，放不下就换位，并用引线指回箭头
+  const labelFont = compact ? 8.4 : 9.6;
+  const occupied = [];
+  // 轨迹编号徽标参与避让，避免相量名称压到编号上
+  const guideBadges = compact ? [] : guides.map((guide, index) => {
+    if (guide.type === 'vline') return { index, x: toPoint(Number(guide.x) || 0, 0).x, y: 36 };
+    if (guide.type === 'hline') return { index, x: width - 32, y: toPoint(0, Number(guide.y) || 0).y };
+    if (guide.type === 'circle') {
+      const cx = Number(guide.cx) || 0;
+      const cy = Number(guide.cy) || 0;
+      const r = (Number(guide.r) || 0) * scale;
+      const center = toPoint(cx, cy);
+      return { index, x: center.x + r * 0.72, y: center.y - r * 0.72 };
+    }
+    return null;
+  }).filter(Boolean);
+  guideBadges.forEach((badge) => {
+    occupied.push({ left: badge.x - 9, top: badge.y - 9, right: badge.x + 9, bottom: badge.y + 9 });
+  });
+  // 坐标轴两端的短标记也纳入避让
+  occupied.push({ left: width - 34, top: origin.y - 18, right: width - 4, bottom: origin.y - 2 });
+  occupied.push({ left: origin.x + 2, top: 14, right: origin.x + 42, bottom: 30 });
+  occupied.push({ left: origin.x - 16, top: origin.y + 4, right: origin.x - 2, bottom: origin.y + 17 });
+  const overlaps = (a, b) => !(a.right + 2 < b.left || a.left - 2 > b.right || a.bottom + 2 < b.top || a.top - 2 > b.bottom);
+  const candidates = [
+    { dx: 10, dy: -4, anchor: 'start' },
+    { dx: 10, dy: 14, anchor: 'start' },
+    { dx: -10, dy: -4, anchor: 'end' },
+    { dx: -10, dy: 14, anchor: 'end' },
+    { dx: 24, dy: -20, anchor: 'start' },
+    { dx: -24, dy: 22, anchor: 'end' },
+    { dx: 0, dy: -14, anchor: 'middle' },
+    { dx: 0, dy: 20, anchor: 'middle' },
+  ];
+  // AI 答疑补充的相量用紫色虚线单独区分；调节前的虚线相量仍不标名称
+  const colorOf = (item) => {
+    if (item.source === 'assistant') return '#7c3aed';
+    return item.quantity === 'current' ? '#ea580c' : 'var(--accent, #2563eb)';
+  };
+  const labelLayout = segments.filter((item) => !item.dashed || item.source === 'assistant').map((item) => {
+    const head = toPoint(item.end.real, item.end.imag);
+    // 图内只放相量名称；幅值、角度与含义统一放到图外的「图示说明」
+    const text = item.label;
+    const boxWidth = Math.min(width - 44, Math.max(24, text.length * labelFont * 0.58 + 8));
+    const boxHeight = labelFont + 4;
+    let chosen = null;
+    for (const candidate of candidates) {
+      const boxLeft = candidate.anchor === 'start'
+        ? head.x + candidate.dx
+        : candidate.anchor === 'end'
+          ? head.x + candidate.dx - boxWidth
+          : head.x + candidate.dx - boxWidth / 2;
+      const baseline = head.y + candidate.dy;
+      if (boxLeft < 2 || boxLeft + boxWidth > width - 2 || baseline - boxHeight < 14 || baseline > height - 30) continue;
+      const box = { left: boxLeft, top: baseline - boxHeight + 3, right: boxLeft + boxWidth, bottom: baseline + 3 };
+      if (occupied.some((used) => overlaps(box, used))) continue;
+      const textX = candidate.anchor === 'start' ? boxLeft : candidate.anchor === 'end' ? boxLeft + boxWidth : boxLeft + boxWidth / 2;
+      chosen = { ...candidate, boxLeft, textX, baseline, box };
+      break;
+    }
+    if (!chosen) {
+      const candidate = candidates[candidates.length - 1];
+      let boxLeft = head.x + candidate.dx - boxWidth / 2;
+      boxLeft = Math.max(2, Math.min(width - 2 - boxWidth, boxLeft));
+      const baseline = Math.max(20, Math.min(height - 32, head.y + candidate.dy));
+      const box = { left: boxLeft, top: baseline - boxHeight + 3, right: boxLeft + boxWidth, bottom: baseline + 3 };
+      chosen = { ...candidate, boxLeft, textX: boxLeft + boxWidth / 2, baseline, box };
+    }
+    occupied.push(chosen.box);
+    const color = colorOf(item);
+    const towardX = Math.max(chosen.box.left, Math.min(head.x, chosen.box.right));
+    const towardY = Math.max(chosen.box.top, Math.min(head.y, chosen.box.bottom));
+    const leader = Math.hypot(towardX - head.x, towardY - head.y) > 14;
+    return { item, head, text, color, chosen, leader, towardX, towardY };
+  });
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label="相量图">
+    <svg viewBox={`0 0 ${width} ${height}`} shapeRendering="geometricPrecision" style={{ width: '100%', height: 'auto', display: 'block' }} role="img" aria-label="相量图">
       {/* 坐标轴 */}
       <line x1={30} y1={origin.y} x2={width - 20} y2={origin.y} stroke="var(--line-strong, #94a3b8)" strokeWidth="1.2" />
       <line x1={origin.x} y1={height - 30} x2={origin.x} y2={20} stroke="var(--line-strong, #94a3b8)" strokeWidth="1.2" />
       <polygon points={`${width - 20},${origin.y} ${width - 30},${origin.y - 4} ${width - 30},${origin.y + 4}`} fill="var(--line-strong, #94a3b8)" />
       <polygon points={`${origin.x},20 ${origin.x - 4},30 ${origin.x + 4},30`} fill="var(--line-strong, #94a3b8)" />
-      <text x={width - 24} y={origin.y - 8} fontSize="9.5" textAnchor="end" fill="var(--muted, #64748b)">实轴 0°</text>
-      <text x={origin.x + 8} y={26} fontSize="9.5" fill="var(--muted, #64748b)">虚轴 +90°</text>
+      <text x={width - 24} y={origin.y - 8} fontSize="8.5" textAnchor="end" fill="var(--muted, #64748b)">{compact ? '' : '0°'}</text>
+      <text x={origin.x + 8} y={26} fontSize="8.5" fill="var(--muted, #64748b)">{compact ? '' : '+90°'}</text>
       <text x={origin.x - 8} y={origin.y + 14} fontSize="9" textAnchor="end" fill="var(--muted, #64748b)">O</text>
 
-      {/* 参考轴 */}
+      {/* 参考轴（U̇ 方向），不再重复文字标签 */}
       <line
         x1={origin.x}
         y1={origin.y}
@@ -349,61 +457,312 @@ function PhasorView({ ir, result }) {
         strokeWidth="1"
         strokeDasharray="5 4"
       />
-      <text x={refPoint.x + 4} y={refPoint.y - 4} fontSize="9.5" fill="var(--muted, #64748b)">{reference.label || '参考'}</text>
 
-      {phasors.map((item, index) => {
-        const point = toPoint(item.magnitude, item.angle);
-        const color = item.quantity === 'current' ? '#ea580c' : 'var(--accent, #2563eb)';
-        const dx = point.x - origin.x;
-        const dy = point.y - origin.y;
+      {/* 端点轨迹：图内只画线 + 编号，文字说明移到图外 */}
+      {guides.map((guide, index) => {
+        const stroke = 'var(--accent, #2563eb)';
+        if (guide.type === 'vline') {
+          const x = toPoint(Number(guide.x) || 0, 0).x;
+          return <line key={`guide-${index}`} x1={x} y1={26} x2={x} y2={height - 30} stroke={stroke} strokeWidth="1" strokeDasharray="6 4" opacity="0.55" />;
+        }
+        if (guide.type === 'hline') {
+          const y = toPoint(0, Number(guide.y) || 0).y;
+          return <line key={`guide-${index}`} x1={30} y1={y} x2={width - 20} y2={y} stroke={stroke} strokeWidth="1" strokeDasharray="6 4" opacity="0.55" />;
+        }
+        if (guide.type === 'circle') {
+          const center = toPoint(Number(guide.cx) || 0, Number(guide.cy) || 0);
+          const r = (Number(guide.r) || 0) * scale;
+          return <circle key={`guide-${index}`} cx={center.x} cy={center.y} r={r} fill="none" stroke={stroke} strokeWidth="1" strokeDasharray="6 4" opacity="0.55" />;
+        }
+        return null;
+      })}
+      {guideBadges.map((badge) => (
+        <g key={`badge-${badge.index}`}>
+          <circle cx={badge.x} cy={badge.y} r="8" fill="var(--surface, #fff)" stroke="var(--accent, #2563eb)" strokeWidth="1" opacity="0.92" />
+          <text x={badge.x} y={badge.y + 0.5} fontSize="9" fontWeight={700} textAnchor="middle" fill="var(--accent, #2563eb)">
+            {String(badge.index + 1)}
+          </text>
+        </g>
+      ))}
+
+      {segments.map((item, index) => {
+        const start = toPoint(item.start.real, item.start.imag);
+        const head = toPoint(item.end.real, item.end.imag);
+        const color = colorOf(item);
+        const dx = head.x - start.x;
+        const dy = head.y - start.y;
         const length = Math.hypot(dx, dy) || 1;
         const ux = dx / length;
         const uy = dy / length;
-        const head = {
-          x: point.x,
-          y: point.y,
-        };
-        const base = { x: point.x - ux * 8, y: point.y - uy * 8 };
+        const base = { x: head.x - ux * 8, y: head.y - uy * 8 };
         const normal = { x: -uy * 4, y: ux * 4 };
-        const labelX = point.x + ux * 10;
-        const labelY = point.y + uy * 10;
+        const dashed = Boolean(item.dashed);
         return (
-          <g key={item.id || index}>
-            <line x1={origin.x} y1={origin.y} x2={head.x} y2={head.y} stroke={color} strokeWidth="2" />
+          <g key={item.id || index} opacity={dashed ? (item.source === 'assistant' ? 0.85 : 0.45) : 1}>
+            <line
+              x1={start.x}
+              y1={start.y}
+              x2={head.x}
+              y2={head.y}
+              stroke={color}
+              strokeWidth={dashed ? 1.4 : 2}
+              strokeDasharray={dashed ? '5 4' : undefined}
+            />
             <polygon points={`${head.x},${head.y} ${base.x + normal.x},${base.y + normal.y} ${base.x - normal.x},${base.y - normal.y}`} fill={color} />
-            <text
-              x={labelX}
-              y={labelY}
-              fontSize="10.5"
-              fontWeight={600}
-              fill={color}
-              textAnchor={ux >= 0 ? 'start' : 'end'}
-            >
-              {item.label} {item.magnitude}{item.unit || ''} ∠{item.angle}°
-            </text>
-            {Math.abs(item.angle) > 0.01 ? (
-              <text x={origin.x + 30 * Math.cos(((item.angle / 2) * Math.PI) / 180)} y={origin.y - 30 * Math.sin(((item.angle / 2) * Math.PI) / 180)} fontSize="9" fill={color} textAnchor="middle">
-                {item.angle}°
-              </text>
-            ) : null}
           </g>
         );
       })}
-      <g transform={`translate(30 ${height - 20})`}>
-        <line x1="0" y1="-4" x2="14" y2="-4" stroke="var(--accent, #2563eb)" strokeWidth="2" />
-        <text x="18" y="0" fontSize="9.5" fill="var(--muted, #64748b)">电压</text>
-        <line x1="60" y1="-4" x2="74" y2="-4" stroke="#ea580c" strokeWidth="2" />
-        <text x="78" y="0" fontSize="9.5" fill="var(--muted, #64748b)">电流</text>
-      </g>
+
+      {labelLayout.map(({ item, head, text, color, chosen, leader, towardX, towardY }, index) => (
+        <g key={`label-${item.id || index}`} opacity={item.dashed ? (item.source === 'assistant' ? 0.9 : 0.6) : 1}>
+          {leader ? (
+            <line x1={head.x} y1={head.y} x2={towardX} y2={towardY} stroke={color} strokeWidth="0.8" opacity="0.45" />
+          ) : null}
+          <text
+            x={chosen.textX}
+            y={chosen.baseline}
+            fontSize={labelFont}
+            fontWeight={600}
+            fill={color}
+            textAnchor={chosen.anchor}
+          >
+            {text}
+          </text>
+        </g>
+      ))}
     </svg>
   );
 }
 
-export default function AnalysisDiagram({ ir, result }) {
+/* ------------------------------------------------ 相量图外的文字说明 */
+
+const GUIDE_ORDINALS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+const PHASOR_BASE_WIDTH = 640;
+const PHASOR_BASE_HEIGHT = 487;
+
+/** 图外说明：轨迹编号、相量幅值/角度、颜色与坐标轴含义 */
+export function PhasorFigureLegend({ ir, result }) {
+  const guides = (Array.isArray(ir?.guides) && ir.guides.length ? ir.guides : (result?.guides || []))
+    .filter((guide) => guide?.label);
+  const phasors = (result?.phasors?.length ? result.phasors : (ir?.phasors || []))
+    .filter((item) => Number(item?.magnitude) > 0);
+  if (!guides.length && !phasors.length) return null;
+  const illustrative = Boolean(ir?.normalized || result?.normalized);
+  const muted = { fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.7 };
+  return (
+    <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, border: '1px dashed var(--line)', background: 'var(--surface)', display: 'grid', gap: 6 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', letterSpacing: '0.04em' }}>图示说明</div>
+      {guides.length ? (
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 700, marginBottom: 2 }}>端点轨迹</div>
+          {guides.map((guide, index) => (
+            <div key={index} style={muted}>
+              <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{GUIDE_ORDINALS[index] || `${index + 1}.`}</span>
+              {' '}
+              {guide.label}{guide.source === 'assistant' ? '（AI 补充）' : ''}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {phasors.length ? (
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 700, marginBottom: 2 }}>
+            相量{illustrative ? '（归一化示意值）' : ''}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 14px' }}>
+            {phasors.map((item, index) => (
+              <span key={item.id || index} style={{ fontSize: 10.5, color: item.source === 'assistant' ? '#7c3aed' : item.quantity === 'current' ? '#c2410c' : 'var(--accent)' }}>
+                {item.label}
+                {' = '}
+                {item.magnitude}{item.unit || ''} ∠{item.angle}°
+                {item.source === 'assistant' ? '（AI 补充，示意）' : ''}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <div style={muted}>
+        横轴为实轴（0°），纵轴为虚轴（+90°）；虚线为参考轴、调节前相量或 AI 补充关系，紫色为 AI 答疑补充，蓝色为电压、橙色为电流。
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------ 可缩放相量图查看器 */
+
+function clampZoom(value) {
+  return Math.max(0.45, Math.min(5, value));
+}
+
+function PhasorCanvas({ ir, result, height = 480, onExpand, onClose }) {
+  const boxRef = useRef(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const zoomRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
+  const dragRef = useRef(null);
+
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { panRef.current = pan; }, [pan]);
+
+  const fit = useCallback(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const width = el.clientWidth;
+    const heightPx = el.clientHeight;
+    if (!width || !heightPx) return;
+    const next = clampZoom(Math.min((width - 16) / PHASOR_BASE_WIDTH, (heightPx - 16) / PHASOR_BASE_HEIGHT));
+    panRef.current = {
+      x: (width - PHASOR_BASE_WIDTH * next) / 2,
+      y: (heightPx - PHASOR_BASE_HEIGHT * next) / 2,
+    };
+    zoomRef.current = next;
+    setZoom(next);
+    setPan(panRef.current);
+  }, []);
+
+  useEffect(() => {
+    fit();
+  }, [fit, ir, result]);
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const handleWheel = (event) => {
+      event.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = event.clientX - rect.left;
+      const cy = event.clientY - rect.top;
+      const prev = zoomRef.current;
+      const next = clampZoom(prev * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
+      if (next === prev) return;
+      zoomRef.current = next;
+      const current = panRef.current;
+      const nextPan = {
+        x: cx - (cx - current.x) * (next / prev),
+        y: cy - (cy - current.y) * (next / prev),
+      };
+      panRef.current = nextPan;
+      setZoom(next);
+      setPan(nextPan);
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  const actualSize = () => {
+    const el = boxRef.current;
+    if (!el) return;
+    const width = el.clientWidth;
+    const heightPx = el.clientHeight;
+    zoomRef.current = 1;
+    const nextPan = {
+      x: (width - PHASOR_BASE_WIDTH) / 2,
+      y: (heightPx - PHASOR_BASE_HEIGHT) / 2,
+    };
+    panRef.current = nextPan;
+    setZoom(1);
+    setPan(nextPan);
+  };
+
+  const startDrag = (event) => {
+    if (event.button !== 0) return;
+    if (event.target?.closest?.('button')) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragRef.current = { startX: event.clientX, startY: event.clientY, pan: panRef.current };
+    event.currentTarget.style.cursor = 'grabbing';
+  };
+  const moveDrag = (event) => {
+    if (!dragRef.current) return;
+    const nextPan = {
+      x: dragRef.current.pan.x + event.clientX - dragRef.current.startX,
+      y: dragRef.current.pan.y + event.clientY - dragRef.current.startY,
+    };
+    panRef.current = nextPan;
+    setPan(nextPan);
+  };
+  const endDrag = (event) => {
+    dragRef.current = null;
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* 已释放 */ }
+    event.currentTarget.style.cursor = 'grab';
+  };
+
+  const toolStyle = {
+    border: '1px solid var(--line)',
+    background: 'var(--surface)',
+    color: 'var(--text)',
+    borderRadius: 7,
+    padding: '3px 9px',
+    fontSize: 10.5,
+    cursor: 'pointer',
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: typeof height === 'number' ? height : height }}>      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--line)', flexWrap: 'wrap' }}>
+        <button type="button" style={toolStyle} onClick={fit}>适应窗口</button>
+        <button type="button" style={toolStyle} onClick={actualSize}>原始大小</button>
+        <button type="button" style={toolStyle} onClick={fit}>复位</button>
+        <span style={{ fontSize: 10.5, color: 'var(--muted)', minWidth: 38, textAlign: 'center' }}>{Math.round(zoom * 100)}%</span>
+        <span style={{ fontSize: 10, color: 'var(--muted)' }}>滚轮缩放 · 拖动平移</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          {onExpand ? <button type="button" style={toolStyle} onClick={onExpand}>放大查看</button> : null}
+          {onClose ? <button type="button" style={toolStyle} onClick={onClose}>关闭</button> : null}
+        </div>
+      </div>
+      <div
+        ref={boxRef}
+        style={{ position: 'relative', flex: 1, minHeight: 220, overflow: 'hidden', background: 'var(--surface-soft)', cursor: 'grab', touchAction: 'none' }}
+        onPointerDown={startDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDoubleClick={fit}
+      >
+        <div style={{ position: 'absolute', left: 0, top: 0, width: PHASOR_BASE_WIDTH, height: PHASOR_BASE_HEIGHT, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0', willChange: 'transform' }}>
+          <AnalysisDiagram ir={ir} result={result} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 主图查看器：内嵌可缩放画布 + 放大浮层 */
+export function PhasorDiagramViewer({ ir, result }) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const handleKey = (event) => { if (event.key === 'Escape') setExpanded(false); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [expanded]);
+  return (
+    <>
+      <PhasorCanvas ir={ir} result={result} height={560} onExpand={() => setExpanded(true)} />
+      {expanded ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="放大查看相量图"
+          style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(15, 23, 42, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          onClick={() => setExpanded(false)}
+        >
+          <div
+            style={{ width: '92vw', height: '88vh', background: 'var(--surface)', borderRadius: 14, boxShadow: '0 24px 70px rgba(0,0,0,0.35)', overflow: 'hidden' }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <PhasorCanvas ir={ir} result={result} height="calc(88vh - 2px)" onClose={() => setExpanded(false)} />
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+export default function AnalysisDiagram({ ir, result, compact = false }) {
   if (!ir) {
     return <div style={{ padding: 20, fontSize: 12, color: 'var(--muted)' }}>还没有结构化结果：先识别题干或图片。</div>;
   }
-  if (ir.kind === 'phasor') return <PhasorView ir={ir} result={result} />;
+  if (ir.kind === 'phasor') return <PhasorView ir={ir} result={result} compact={compact} />;
   if (ir.kind === 'one-line') return <OneLineView ir={ir} result={result} />;
   return <CircuitView ir={ir} result={result} />;
 }
