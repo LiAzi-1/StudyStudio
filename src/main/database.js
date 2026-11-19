@@ -647,6 +647,11 @@ function getPapers() {
              SELECT COUNT(*)
              FROM questions q
              WHERE q.paper_id = p.id
+           ) AS actual_question_count,
+           (
+             SELECT COUNT(*)
+             FROM questions q
+             WHERE q.paper_id = p.id
                AND TRIM(COALESCE(q.answer, '')) = ''
                AND COALESCE(NULLIF(TRIM(q.answer_images), ''), '[]') IN ('[]', 'null')
            ) AS missing_answer_count
@@ -765,8 +770,10 @@ function getPracticeRecords() {
 
 /**
  * 科目可用的最完整知识清单。
- * subjects.knowledge_summary 会被截断（当前真实库只有 868 字，缺后几章），
+ * subjects.knowledge_summary 由清单笔记同步而来，但旧数据可能滞后；
  * 优先用同科目「知识清单」笔记的完整内容，保证分类目录不缺章。
+ * 识别不依赖标题（标题可能被 Obsidian/编辑器改写），而是清单笔记的结构标识：
+ * meta.chapters 或正文里的「## 模块N」。
  */
 function getSubjectKnowledgeContent(subjectId) {
   const id = String(subjectId || '').trim();
@@ -774,12 +781,19 @@ function getSubjectKnowledgeContent(subjectId) {
   const summary = String(db.prepare('SELECT knowledge_summary FROM subjects WHERE id = ?').get(id)?.knowledge_summary || '');
   const note = db.prepare(`
     SELECT content FROM notes
-    WHERE subject_id = ? AND title LIKE '%知识清单%' AND COALESCE(content, '') <> ''
-    ORDER BY length(content) DESC
+    WHERE subject_id = ? AND COALESCE(content, '') <> ''
+      AND (
+        meta LIKE '%"chapters":[%'
+        OR content LIKE '%## 模块%'
+      )
+    ORDER BY (meta LIKE '%"chapters":[%') DESC,
+             (content LIKE '%## 模块%') DESC,
+             length(content) DESC
     LIMIT 1
   `).get(id);
   const content = String(note?.content || '');
-  return content.length > summary.length ? content : summary;
+  // 笔记是用户可直接编辑的权威副本：找到就整篇采用，不再因为「比 summary 短」而回退
+  return content.trim() ? content : summary;
 }
 
 /** 一批试卷对应的科目（含教材知识清单），重新分类时用来判断是否自建科目 */

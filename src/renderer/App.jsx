@@ -10,6 +10,7 @@ import Library from "./pages/Library.jsx";
 import Settings from "./pages/Settings.jsx";
 import AIHub from "./pages/AIHub.jsx";
 import AIGenerate from "./pages/AIGenerate.jsx";
+import AnalysisWorkbench from "./pages/AnalysisWorkbench.jsx";
 import WrongBook from "./pages/WrongBook.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import GrowthCenter from "./pages/GrowthCenter.jsx";
@@ -222,6 +223,8 @@ function AppMain() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [profile, setProfile] = useState({ name: "考生用户", avatar: "" });
   const [settingsSection, setSettingsSection] = useState("ai");
+  // 学科分析工作台：从 AI 答疑或插件管理进入，带上插件 id 与可选的题目种子
+  const [analysisLaunch, setAnalysisLaunch] = useState({ pluginId: "", seed: null, returnPage: "ai-teacher" });
   // 从「去配置 AI / 去装环境」进入设置时，返回键回到原页面而不是首页
   const [settingsReturnPage, setSettingsReturnPage] = useState("");
   const userMenuRef = useRef(null);
@@ -395,6 +398,13 @@ function AppMain() {
     setSettingsSection(section);
     setSettingsReturnPage(returnPage || "");
     setPage("settings");
+  };
+
+  /** 打开学科分析插件工作台；seed 可带题干与图片，进入后自动识别一次 */
+  const openAnalysis = (pluginId, seed = null, returnPage = "ai-teacher") => {
+    if (!pluginId) return;
+    setAnalysisLaunch({ pluginId, seed: seed || null, returnPage });
+    setPage("analysis");
   };
 
   const onboarding = (
@@ -1366,6 +1376,7 @@ function AppMain() {
                   profile={profile}
                   initialSection={settingsSection}
                   onProfileSaved={handleProfileSaved}
+                  onOpenAnalysis={(pluginId, seed) => openAnalysis(pluginId, seed, "settings")}
                 />
               ) : page === "ai-generate" ? (
                 <AIGenerate
@@ -1379,6 +1390,17 @@ function AppMain() {
                   onNavigate={handleAssistantNavigate}
                   assistantSubjectId={assistantSubjectId}
                   onOpenSettings={() => openSettings("ai", "ai-teacher")}
+                  onOpenAnalysis={(pluginId, seed) => openAnalysis(pluginId, seed, "ai-teacher")}
+                />
+              ) : page === "analysis" ? (
+                <AnalysisWorkbench
+                  pluginId={analysisLaunch.pluginId}
+                  seed={analysisLaunch.seed}
+                  onBack={() => {
+                    if (analysisLaunch.returnPage === "settings") openSettings("plugins");
+                    else setPage(analysisLaunch.returnPage || "ai-teacher");
+                  }}
+                  onOpenSettings={(section) => openSettings(section || "plugins", "ai-teacher")}
                 />
               ) : page === "wrong-book" ? (
                 <WrongBook

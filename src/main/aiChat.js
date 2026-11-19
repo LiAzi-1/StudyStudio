@@ -103,6 +103,13 @@ function buildSystem({ database, subjectId, messages, questionContext }) {
   if (notesBlock) {
     system += `\n\n${notesBlock}`;
   }
+  // 学科分析插件：只有「绑定科目 + 插件启用 + 匹配」时才注入，不适用时模型看不到
+  try {
+    const pluginBlock = require('./plugins/index.js').buildChatPluginPrompt(subjectId);
+    if (pluginBlock) system += `\n\n${pluginBlock}`;
+  } catch (error) {
+    console.warn('[Plugins] 注入插件提示词失败:', error?.message || error);
+  }
   if (questionContext) {
     system += `\n\n## 本次会话锁定的题目\n用户正在追问下面这道题。讲解与动作都要围绕它，不要把上下文丢掉；如果用户换了新题，以新题为准。\n\n${buildQuestionContextPrompt(questionContext)}`;
   }
@@ -306,15 +313,29 @@ function importChatLog({ database, title, subjectId, messages }) {
   return { success: true, sessionId: session.id, title: session.title, count: list.length };
 }
 
-function finishResult({ result, citations, route }) {
+function finishResult({ result, citations, route, subjectId }) {
   const parsed = assistantAgent.parseAssistantReply(result?.content || '');
   const cited = validateCitations(parsed.reply || '', citations || []);
+  let action = parsed.action;
+  let actionError = parsed.actionError;
+  // 动作只能绑定「当前科目匹配 + 已启用」的插件，模型自报的 id 不作数
+  if (action?.type === 'run_analysis_plugin') {
+    let matched = null;
+    try {
+      matched = (require('./plugins/index.js').forSubject(subjectId)?.plugins || [])
+        .find((plugin) => plugin.id === action.pluginId);
+    } catch { /* 插件模块异常时按不可用处理 */ }
+    if (!matched) {
+      action = null;
+      actionError = '该学科分析插件在当前科目不可用，已忽略这次调用';
+    }
+  }
   return {
     success: Boolean(result?.success),
     content: cited.content,
     citations: cited.citations,
-    action: parsed.action,
-    actionError: parsed.actionError,
+    action,
+    actionError,
     role: route.role,
     model: route.model,
     fallback: route.fallback,
@@ -329,7 +350,7 @@ async function chat({ settings, database, messages, images, subjectId, questionC
   const { system, citations } = buildSystem({ database, subjectId, messages, questionContext });
   const payload = buildMessages({ messages, images, questionContext });
   const result = await aiService.chat(route.settings, payload, { system, maxTokens: 8192 });
-  return finishResult({ result, citations, route });
+  return finishResult({ result, citations, route, subjectId });
 }
 
 async function chatStream({ settings, database, messages, images, subjectId, questionContext, onDelta, signal }) {
@@ -343,7 +364,7 @@ async function chatStream({ settings, database, messages, images, subjectId, que
     signal,
     onDelta: (delta) => { try { onDelta?.(delta); } catch { /* 忽略 */ } },
   });
-  return finishResult({ result, citations, route });
+  return finishResult({ result, citations, route, subjectId });
 }
 
 module.exports = {

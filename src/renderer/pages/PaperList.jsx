@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { actions } from '../store/examStore.js';
 import CustomSelect from '../components/CustomSelect.jsx';
 import { buildPaperShareText, copyText } from '../utils/paperShare.js';
+import { buildPaperSubjectIndex, buildSubjectStats } from '../utils/paperSubjects.js';
 import { useDialog } from '../components/DialogProvider.jsx';
 import LuoCat from '../components/LuoCat.jsx';
 
@@ -65,6 +66,7 @@ function hasAnyAnswer(record) {
 
 export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword = '', focusToken = 0, onGoAIGenerate, embedded = false }) {
   const [papers, setPapers] = useState([]);
+  const [subjectList, setSubjectList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedYear, setSelectedYear] = useState('all');
   const [selectedSubject, setSelectedSubject] = useState('all');
@@ -79,11 +81,13 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
-      const [paperData, recordData] = await Promise.all([
+      const [paperData, recordData, subjectData] = await Promise.all([
         actions.loadPapers(),
         window.openexam?.db?.getPracticeRecords ? window.openexam.db.getPracticeRecords() : Promise.resolve([]),
+        window.openexam?.subject?.list ? window.openexam.subject.list() : Promise.resolve([]),
       ]);
       setPapers(paperData);
+      setSubjectList(Array.isArray(subjectData) ? subjectData : []);
       const nextResumable = {};
       (recordData || []).forEach((record) => {
         if (!record?.paper_id || nextResumable[record.paper_id]) return;
@@ -110,22 +114,44 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
   const trackPapers = useMemo(() => papers, [papers]);
   // 获取可用筛选项
   const years = useMemo(() => [...new Set(trackPapers.map(p => p.year))].sort((a, b) => b - a), [trackPapers]);
-  const subjects = useMemo(() => [...new Set(trackPapers.map(p => String(p.subject || '').trim()).filter(Boolean))], [trackPapers]);
+
+  /**
+   * 试卷 → 学科：优先 subject_id；旧数据只有学科大类时，只有该大类唯一对应
+   * 一个科目才自动归属，否则单列「未归属」，不猜具体科目。
+   */
+  const paperSubject = useMemo(
+    () => buildPaperSubjectIndex(trackPapers, subjectList),
+    [trackPapers, subjectList],
+  );
+
+  const subjectStats = useMemo(
+    () => buildSubjectStats(trackPapers, subjectList, paperSubject),
+    [trackPapers, subjectList, paperSubject],
+  );
+
   const normalizedKeyword = String(keyword || '').trim().toLowerCase();
 
   // 筛选试卷
   const filteredPapers = trackPapers.filter(p => {
     // 年份筛选
     if (selectedYear !== 'all' && p.year !== parseInt(selectedYear)) return false;
-    // 科目筛选
-    if (selectedSubject !== 'all' && String(p.subject || '') !== selectedSubject) return false;
+    // 学科筛选
+    if (selectedSubject !== 'all') {
+      const subject = paperSubject.get(p.id);
+      if (selectedSubject === 'unassigned') {
+        if (subject) return false;
+      } else if (!subject || subject.id !== selectedSubject) {
+        return false;
+      }
+    }
     // 关键词搜索
     if (normalizedKeyword) {
+      const subject = paperSubject.get(p.id);
       const haystack = [
         p.title,
         p.province,
         normalizePaperProvince(p.province),
-        p.subject,
+        subject?.name,
         String(p.year || ''),
       ].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(normalizedKeyword)) return false;
@@ -220,8 +246,8 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
               value={selectedSubject}
               onChange={(nextValue) => setSelectedSubject(nextValue)}
               options={[
-                { value: 'all', label: '全部科目' },
-                ...subjects.map((subject) => ({ value: subject, label: subject })),
+                { value: 'all', label: '全部学科' },
+                ...subjectStats.list.map((subject) => ({ value: subject.id, label: subject.name })),
               ]}
             />
           </div>
@@ -249,6 +275,47 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
         </div>
       </div>
 
+      {/* 跨学科总览：每科题量 / 缺答案数，点击即筛选 */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        {[subjectStats.total, ...subjectStats.list].map((item) => {
+          const active = selectedSubject === item.id;
+          const isUnassigned = item.id === 'unassigned';
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => { setSelectedSubject(item.id); setCurrentPage(1); }}
+              style={{
+                textAlign: 'left',
+                minWidth: 128,
+                padding: '8px 11px',
+                borderRadius: 10,
+                border: `1px solid ${active ? 'var(--accent)' : 'var(--line)'}`,
+                background: active ? 'var(--accent-soft-bg)' : 'var(--surface)',
+                color: 'var(--text)',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {item.name}
+                {isUnassigned ? <span style={{ fontSize: 9.5, color: 'var(--muted)', fontWeight: 500 }}>未绑定科目</span> : null}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>
+                {item.paperCount} 套 · {item.questionCount} 题
+              </div>
+              <div style={{ fontSize: 10.5, marginTop: 2, color: item.missingAnswers > 0 ? '#b45309' : 'var(--muted)' }}>
+                缺答案 {item.missingAnswers} 题
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {subjectStats.list.some((item) => item.id === 'unassigned') ? (
+        <div style={{ fontSize: 10.5, color: 'var(--muted)', marginBottom: 10 }}>
+          「未归属」是历史数据没有绑定具体科目、也无法从学科大类唯一确定的试卷；不自动猜测，可在对应试卷里补充科目。
+        </div>
+      ) : null}
+
       {/* 试卷列表 */}
       <div className="paper-grid">
         {paginatedPapers.map(paper => {
@@ -265,7 +332,7 @@ export default function PaperList({ onOpenPaper, onReviewPaper, initialKeyword =
             </div>
             <h3 className="paper-title">{paper.title}</h3>
             <div className="paper-meta">
-              <span>{paper.question_count || paper.questionCount} 题</span>
+              <span>{paper.actual_question_count ?? paper.question_count ?? paper.questionCount} 题</span>
               <span>{paper.duration || 120} 分钟</span>
               <span className="paper-difficulty">
                 {'★'.repeat(paper.difficulty || 3)}{'☆'.repeat(5 - (paper.difficulty || 3))}

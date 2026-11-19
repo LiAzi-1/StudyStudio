@@ -274,8 +274,81 @@ def norm_bbox(bbox) -> list | None:
     return None
 
 
-def convert(doc: dict) -> list[dict]:
-    """把 docvortex.middle 文档转成 2.x content_list 数组。"""
+# ---------------------------------------------------------------------------
+# 插图裁切：MinerU 4.x 的 doclib JSON 只有 0~1 归一化 bbox，没有图片字节。
+# 这里用 pypdfium2 按 bbox 渲染并裁出 JPEG，产物与 MinerU 2.x 的 images/ 对齐。
+# 选型理由：basic 档 JSON 已带 bbox、venv 已装 pypdfium2，无需重跑 OCR、
+# 不新增依赖，也不需要改档位或引 pdf.js 在渲染层裁图。
+# ---------------------------------------------------------------------------
+
+_PDF_DOCS: dict = {}
+_PAGE_CACHE: dict = {"key": None, "image": None}
+
+
+def _render_page(pdf_path: Path, page_idx: int, scale: float = 2.0):
+    """渲染一页为 PIL Image（同一个页面的多个图块复用同一张位图）。"""
+    key = (str(pdf_path), int(page_idx), scale)
+    if _PAGE_CACHE.get("key") == key:
+        return _PAGE_CACHE.get("image")
+    import pypdfium2 as pdfium  # 延迟导入：--from-json / 无图模式不需要
+
+    doc = _PDF_DOCS.get(str(pdf_path))
+    if doc is None:
+        doc = pdfium.PdfDocument(str(pdf_path))
+        _PDF_DOCS[str(pdf_path)] = doc
+    page = doc[int(page_idx)]
+    image = page.render(scale=scale).to_pil().convert("RGB")
+    try:
+        page.close()
+    except Exception:  # noqa: BLE001
+        pass
+    _PAGE_CACHE["key"] = key
+    _PAGE_CACHE["image"] = image
+    return image
+
+
+def crop_figure(pdf_path, out_dir, page_idx: int, block_index, bbox, scale: float = 2.0) -> str | None:
+    """按 0~1 归一化 bbox 裁出插图，写到 <out_dir>/images/，返回相对路径（/ 分隔）。"""
+    if not pdf_path or not out_dir or not bbox:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in bbox)
+        # 兼容 0~1000 坐标（下游注释曾按 0-1000 约定）
+        if max(x1, y1, x2, y2) > 1.5:
+            x1, y1, x2, y2 = x1 / 1000, y1 / 1000, x2 / 1000, y2 / 1000
+        left, right = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+        top, bottom = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+        # 面积过小（页眉横线、字符碎片）不裁，避免制造噪声图
+        if right - left < 0.02 or bottom - top < 0.02:
+            return None
+
+        image = _render_page(Path(pdf_path), page_idx, scale)
+        width, height = image.size
+        box = (
+            int(left * width),
+            int(top * height),
+            min(width, int(round(right * width))),
+            min(height, int(round(bottom * height))),
+        )
+        if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+            return None
+        crop = image.crop(box)
+        rel = f"images/page_{int(page_idx)}_image_{block_index}.jpg"
+        target = Path(out_dir) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        crop.save(target, "JPEG", quality=88)
+        return rel
+    except Exception as exc:  # noqa: BLE001
+        log(f"裁图失败 page={page_idx} index={block_index}: {exc}")
+        return None
+
+
+def convert(doc: dict, pdf_path=None, out_dir=None) -> list[dict]:
+    """把 docvortex.middle 文档转成 2.x content_list 数组。
+
+    pdf_path + out_dir 都给定时，image 块会按 bbox 裁出真实图片并写成
+    type=image 块（供下游 parseContentList 落盘）；否则维持旧行为，只留图注文字。
+    """
     pages = doc.get("pages")
     if not isinstance(pages, list):
         raise ValueError("解析 JSON 缺少 pages 字段")
@@ -288,6 +361,7 @@ def convert(doc: dict) -> list[dict]:
             page_idx = 0
         blocks = page.get("blocks") or []
         page_out: list[dict] = []
+        image_seq = 0
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -309,7 +383,10 @@ def convert(doc: dict) -> list[dict]:
                 continue
 
             if btype == "image":
-                # flash 档不含图片字节，只保留图注/表注文字；没有文字时由整页兜底处理
+                # 印章/水印不是教材插图，别让下游当成「图 X-Y」
+                if str(block.get("sub_type") or "") == "seal":
+                    continue
+                # flash 档不含图片字节；basic 档有 bbox，可按页渲染裁出真实插图
                 texts: list[str] = []
                 for item in (block.get("content") or []):
                     if not isinstance(item, dict):
@@ -325,8 +402,24 @@ def convert(doc: dict) -> list[dict]:
                     elif kind == "image_footnote" and re.match(r"^(图|表)\s*[\d一二三四五六七八九十]", content):
                         texts.append(content)
                 text = "\n".join(dict.fromkeys(texts)).strip()
+                bbox = norm_bbox(block.get("bbox"))
+                image_seq += 1
+                img_rel = crop_figure(
+                    pdf_path, out_dir, page_idx,
+                    block.get("index") if block.get("index") is not None else image_seq,
+                    bbox,
+                )
+                if img_rel:
+                    page_out.append({
+                        "type": "image",
+                        "page_idx": page_idx,
+                        "img_path": img_rel,
+                        "img_caption": texts,
+                        "bbox": [round(v * 1000) for v in bbox] if bbox else None,
+                    })
+                # 图注仍作为正文保留：教材全文与图号定位都依赖它
                 if text:
-                    page_out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": norm_bbox(block.get("bbox"))})
+                    page_out.append({"type": "text", "page_idx": page_idx, "text": text, "bbox": bbox})
                 continue
 
             text = block_text(block)
@@ -469,7 +562,7 @@ def main() -> int:
                 raise RuntimeError(
                     f"解析未完成：已得 {covered}/{expected_for_req} 页（mineru 退出码 {code}）。日志尾部：\n{tail}"
                 )
-            content_list = convert({"pages": merged_pages})
+            content_list = convert({"pages": merged_pages}, pdf_path=pdf, out_dir=out_dir)
             if not content_list:
                 raise ValueError("转换后 content_list 为空")
             name = write_part(out_dir, start, end, content_list)
@@ -506,7 +599,7 @@ def main() -> int:
                     pass
                 raise RuntimeError(f"批次 {page_range} 解析未完成：已得 {covered}/{expected_for_req} 页（退出码 {code}）。日志尾部：\n{tail}")
 
-            content_list = convert({"pages": merged_pages})
+            content_list = convert({"pages": merged_pages}, pdf_path=pdf, out_dir=out_dir)
             if not content_list:
                 log(f"批次 {page_range} 无文本块（可能是空白页），写出空批次")
             name = write_part(out_dir, a, b, content_list)

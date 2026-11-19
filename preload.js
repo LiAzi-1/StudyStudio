@@ -123,6 +123,7 @@ contextBridge.exposeInMainWorld("openexam", {
     planEdit: (input) => ipcRenderer.invoke("note:planEdit", input),
     applyEdit: (input) => ipcRenderer.invoke("note:applyEdit", input),
     tags: () => ipcRenderer.invoke("note:tags"),
+    tree: () => ipcRenderer.invoke("note:tree"),
     tutor: (input) => ipcRenderer.invoke("note:tutor", input),
     addImage: (input) => ipcRenderer.invoke("note:addImage", input),
     removeImage: (input) => ipcRenderer.invoke("note:removeImage", input),
@@ -271,6 +272,21 @@ contextBridge.exposeInMainWorld("openexam", {
       ipcRenderer.on("subject:questions:progress", listener);
       return () => ipcRenderer.removeListener("subject:questions:progress", listener);
     },
+  },
+
+  // 学科分析插件：列表 / 启停 / 导入 / 结构化识别 / 计算 / 讲解
+  plugins: {
+    list: () => ipcRenderer.invoke("plugins:list"),
+    devMode: () => ipcRenderer.invoke("plugins:devMode"),
+    detail: (id) => ipcRenderer.invoke("plugins:detail", id),
+    forSubject: (subjectId) => ipcRenderer.invoke("plugins:forSubject", subjectId),
+    setEnabled: (id, enabled) => ipcRenderer.invoke("plugins:setEnabled", { id, enabled }),
+    importFile: () => ipcRenderer.invoke("plugins:import"),
+    importFromPath: (filePath) => ipcRenderer.invoke("plugins:importFile", filePath),
+    remove: (id) => ipcRenderer.invoke("plugins:remove", id),
+    extract: (payload) => ipcRenderer.invoke("plugins:extract", payload),
+    solve: (payload) => ipcRenderer.invoke("plugins:solve", payload),
+    explain: (payload) => ipcRenderer.invoke("plugins:explain", payload),
   },
 
   // 运行环境：MinerU / Python 真实检测 + 一键安装，Obsidian 安装状态

@@ -10666,6 +10666,201 @@ button {
   gap: 12px;
 }
 
+/* 学科卡片：笔记页第一层 */
+.note-subjects {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.note-subject-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.note-subject-card:hover {
+  border-color: var(--accent-border-soft);
+  box-shadow: var(--elevated-shadow);
+  transform: translateY(-1px);
+}
+
+.note-subject-card strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.note-subject-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.note-subject-counts em {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--neutral-soft-bg);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.note-subject-total {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 树状图：学科 → 三类 → 模块 → 笔记，横向延展 */
+.note-tree-wrap {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.note-tree-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.note-tree-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.note-tree-total {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.note-tree {
+  display: flex;
+  align-items: flex-start;
+  padding: 18px 16px 22px;
+  overflow-x: auto;
+}
+
+.note-tree-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 168px;
+  padding-right: 28px;
+}
+
+.note-tree-col + .note-tree-col {
+  padding-left: 28px;
+  border-left: 1px dashed var(--line);
+}
+
+.note-tree-col.note-tree-notes { min-width: 240px; }
+
+.note-tree-node {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.note-tree-node strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.note-tree-node em {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+button.note-tree-node:hover {
+  border-color: var(--accent-border-soft);
+  background: var(--accent-soft-bg);
+}
+
+.note-tree-node.is-root {
+  border-color: transparent;
+  background: var(--accent-soft-bg-strong);
+  color: var(--accent);
+  cursor: default;
+}
+
+.note-tree-node.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft-bg-strong);
+  color: var(--accent);
+}
+
+.note-tree-node.is-empty,
+.note-tree-node:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.note-tree-node.is-muted strong { color: var(--muted); }
+
+.note-tree-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.note-tree-note:hover {
+  border-color: var(--accent-border-soft);
+  background: var(--accent-soft-bg);
+}
+
+.note-tree-note strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.note-tree-note span {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.note-tree-note.is-pinned { border-color: var(--accent-border-soft); }
+
+.note-tree-empty {
+  padding: 14px 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 .note-card {
   display: flex;
   flex-direction: column;

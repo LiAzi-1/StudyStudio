@@ -713,36 +713,41 @@ function saveNote(input = {}) {
   }
   const content = normalized.text;
   const tags = normalizeTags(input.tags);
-  const title = String(input.title || '').trim() || deriveNoteTitle(content);
+  const existing = input.id
+    ? db.prepare('SELECT id, title, meta FROM notes WHERE id = ?').get(input.id)
+    : null;
+  // 标题优先级：显式传入 > 原有标题 > 从正文首行推导。
+  // 已有笔记只改正文时绝不改写标题，否则「> 来源…」这类正文首行会把用户
+  // 或 AI 起的名字覆盖掉（Obsidian 镜像的文件名也会跟着坏）。
+  const title = String(input.title || '').trim()
+    || String(existing?.title || '').trim()
+    || deriveNoteTitle(content);
 
-  if (input.id) {
-    const exists = db.prepare('SELECT id, meta FROM notes WHERE id = ?').get(input.id);
-    if (exists) {
-      // meta 不传就保留原值；显式传 null 才是清空（撤销整理时会用到）
-      const nextMeta = input.meta === undefined
-        ? (exists.meta ?? null)
-        : stringifyJSON(input.meta);
-      db.prepare(`
-        UPDATE notes
-        SET title = @title, content = @content, tags = @tags,
-            source_type = @sourceType, source_id = @sourceId, source_label = @sourceLabel,
-            subject_id = COALESCE(@subjectId, subject_id),
-            pinned = @pinned, meta = @meta, updated_at = CURRENT_TIMESTAMP
-        WHERE id = @id
-      `).run({
-        id: input.id,
-        title,
-        content,
-        tags: stringifyJSON(tags),
-        sourceType: input.sourceType || null,
-        sourceId: input.sourceId || null,
-        sourceLabel: input.sourceLabel || null,
-        subjectId: input.subjectId || null,
-        pinned: input.pinned ? 1 : 0,
-        meta: nextMeta,
-      });
-      return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(input.id));
-    }
+  if (existing) {
+    // meta 不传就保留原值；显式传 null 才是清空（撤销整理时会用到）
+    const nextMeta = input.meta === undefined
+      ? (existing.meta ?? null)
+      : stringifyJSON(input.meta);
+    db.prepare(`
+      UPDATE notes
+      SET title = @title, content = @content, tags = @tags,
+          source_type = @sourceType, source_id = @sourceId, source_label = @sourceLabel,
+          subject_id = COALESCE(@subjectId, subject_id),
+          pinned = @pinned, meta = @meta, updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `).run({
+      id: input.id,
+      title,
+      content,
+      tags: stringifyJSON(tags),
+      sourceType: input.sourceType || null,
+      sourceId: input.sourceId || null,
+      sourceLabel: input.sourceLabel || null,
+      subjectId: input.subjectId || null,
+      pinned: input.pinned ? 1 : 0,
+      meta: nextMeta,
+    });
+    return afterNoteWrite(input.id);
   }
 
   const id = input.id || uid();
@@ -763,7 +768,296 @@ function saveNote(input = {}) {
   });
 
   bumpTodoProgress('note', 1);
-  return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
+  return afterNoteWrite(id);
+}
+
+/**
+ * 清单笔记的正文是 AI 答疑/分类的模块名来源。
+ * 任何一次落库（应用内保存、Obsidian 回流、AI 局部改写、清单生成）之后
+ * 都把正文同步进 subjects.knowledge_summary，避免两边长期分叉。
+ */
+function afterNoteWrite(id) {
+  const note = mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
+  try {
+    syncKnowledgeSummaryFromNote(note);
+  } catch (error) {
+    // 同步失败不能影响笔记本身落库（下次保存或生成会再同步）
+    console.warn('[Notes] 同步知识清单到科目快照失败:', error?.message || error);
+  }
+  return note;
+}
+
+const INVENTORY_HEADING_RE = /^##\s*模块\s*\d+/m;
+
+/**
+ * 只有「整本知识清单」笔记才算数：它由清单生成器写入，meta 带 chapters，
+ * 正文以「## 模块N」开头；章节总结笔记虽然也带 kind=knowledge，但不应覆盖科目清单。
+ */
+function isInventoryNote(note) {
+  if (!note) return false;
+  const meta = note.meta && typeof note.meta === 'object' ? note.meta : null;
+  if (meta && Array.isArray(meta.chapters) && meta.chapters.length) return true;
+  return INVENTORY_HEADING_RE.test(String(note.content || ''));
+}
+
+function syncKnowledgeSummaryFromNote(noteOrId) {
+  const note = typeof noteOrId === 'string' ? getNote(noteOrId) : noteOrId;
+  if (!note?.subjectId || !isInventoryNote(note)) {
+    return { updated: false, reason: 'not-inventory' };
+  }
+  const content = String(note.content || '');
+  if (!content.trim()) return { updated: false, reason: 'empty' };
+  const subject = db.prepare('SELECT knowledge_summary FROM subjects WHERE id = ?').get(note.subjectId);
+  if (!subject) return { updated: false, reason: 'no-subject' };
+  if (String(subject.knowledge_summary || '') === content) {
+    return { updated: false, reason: 'unchanged' };
+  }
+  db.prepare('UPDATE subjects SET knowledge_summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(content, note.subjectId);
+  return { updated: true, subjectId: note.subjectId, chars: content.length };
+}
+
+/**
+ * 启动对账：历史上被 Obsidian / 笔记编辑器改过、但 summary 没跟上的科目，
+ * 在这里一次性补齐；找不到清单笔记的科目保持原样，不做清空。
+ */
+function reconcileKnowledgeSummaries() {
+  const subjects = db.prepare('SELECT id FROM subjects').all();
+  const updated = [];
+  for (const subject of subjects) {
+    const row = db.prepare(`
+      SELECT * FROM notes
+      WHERE subject_id = ? AND COALESCE(content, '') <> ''
+        AND (meta LIKE '%"chapters":[%' OR content LIKE '%## 模块%')
+      ORDER BY (meta LIKE '%"chapters":[%') DESC, length(content) DESC
+      LIMIT 1
+    `).get(subject.id);
+    if (!row) continue;
+    const result = syncKnowledgeSummaryFromNote(mapNote(row));
+    if (result.updated) updated.push(result);
+  }
+  return { updated: updated.length, subjects: updated };
+}
+
+/* ------------------------------------------------------- 笔记树 / 分类 */
+
+const NOTE_TAGS = { inventory: '知识清单', subject: '学科笔记', qa: '答疑笔记' };
+const SPECIAL_NOTE_TAGS = new Set(Object.values(NOTE_TAGS));
+
+/**
+ * 笔记分类的唯一判定入口：
+ *   inventory = 知识清单（meta.chapters 是清单生成器写的结构标记）
+ *   qa        = 答疑笔记（历史标签或显式 category）
+ *   subject   = 其余（AI 整理的学科笔记、手写笔记）
+ */
+function noteCategoryOf(note) {
+  const meta = note?.meta && typeof note.meta === 'object' ? note.meta : {};
+  if (['inventory', 'subject', 'qa'].includes(meta.category)) return meta.category;
+  if (Array.isArray(meta.chapters) && meta.chapters.length) return 'inventory';
+  const tags = Array.isArray(note?.tags) ? note.tags : [];
+  if (tags.includes(NOTE_TAGS.qa)) return 'qa';
+  return 'subject';
+}
+
+/** 从知识清单正文解析模块：## 模块N 标题（第 x–y 页） */
+function parseInventoryModules(content) {
+  const modules = [];
+  for (const line of String(content || '').split('\n')) {
+    const match = line.match(/^##\s*模块\s*(\d+)\s*(.*)$/);
+    if (!match) continue;
+    const raw = String(match[2] || '');
+    const pages = raw.match(/第\s*(\d+)\s*[–—\-~～]\s*(\d+)\s*页/);
+    const title = raw.replace(/[（(][^）)]*[）)]/g, '').replace(/\s+/g, ' ').trim();
+    modules.push({
+      no: Number(match[1]),
+      title: title || `模块${match[1]}`,
+      fromPage: pages ? Number(pages[1]) : null,
+      toPage: pages ? Number(pages[2]) : null,
+    });
+  }
+  return modules;
+}
+
+function cjkBigrams(text) {
+  const clean = String(text || '').replace(/[\s\p{P}\p{S}]/gu, '');
+  const set = new Set();
+  for (let i = 0; i + 1 < clean.length; i += 1) set.add(clean.slice(i, i + 2));
+  return set;
+}
+
+function cjkNumber(text) {
+  const raw = String(text || '');
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const digits = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  if (raw === '十') return 10;
+  let value = 0;
+  for (const char of raw) {
+    if (char === '十') value = (value || 1) * 10;
+    else if (digits[char]) value += digits[char];
+  }
+  return value || null;
+}
+
+/** 标题里的章节线索：第 N 章 或 N.M 小节号，模块编号通常与教材章号一致 */
+function chapterHintFromTitle(title) {
+  const text = String(title || '');
+  const chapter = text.match(/第\s*([0-9一二三四五六七八九十]+)(?:\s*[–—\-~～到至]\s*[0-9一二三四五六七八九十]+)?\s*章/);
+  if (chapter) return cjkNumber(chapter[1]);
+  const section = text.match(/(?:^|[（(、\s])([0-9]{1,2})\.[0-9]{1,2}/);
+  if (section) return Number(section[1]);
+  return null;
+}
+
+function coverage(grams, target) {
+  if (!grams.size) return 0;
+  let hit = 0;
+  for (const gram of grams) if (target.has(gram)) hit += 1;
+  return hit / grams.size;
+}
+
+/** 章节归属：模块标题与笔记标题/正文的双向重合度；标题里的章号作为强提示 */
+function matchNoteModule(note, modules) {
+  if (!modules.length) return { moduleNo: null, module: '' };
+  const title = String(note.title || '');
+  const body = String(note.content || '').slice(0, 4000);
+  const textGrams = cjkBigrams(`${title}\n${body}`);
+  const titleGrams = cjkBigrams(title);
+  const hint = chapterHintFromTitle(title);
+  // 章号能对上模块时以章号为准（除非标题里明写了别的模块全名）
+  const hinted = hint ? modules.find((module) => module.no === hint) : null;
+  if (hinted && !modules.some((module) => module.no !== hinted.no && module.title && title.includes(module.title))) {
+    return { moduleNo: hinted.no, module: hinted.title };
+  }
+  let best = null;
+  for (const module of modules) {
+    const grams = cjkBigrams(module.title);
+    if (!grams.size) continue;
+    const moduleInText = coverage(grams, textGrams);
+    const noteInModule = coverage(titleGrams, grams) * 0.9;
+    let score = Math.max(moduleInText, noteInModule);
+    if (module.title && title.includes(module.title)) score += 0.5;
+    else if (module.title && body.includes(module.title)) score += 0.2;
+    if (hint && hint === module.no) score += 0.6;
+    if (!best || score > best.score) best = { score, moduleNo: module.no, module: module.title };
+  }
+  if (!best || best.score < 0.34) return { moduleNo: null, module: '' };
+  return { moduleNo: best.moduleNo, module: best.module };
+}
+
+/**
+ * 一次性把存量笔记补上 category / moduleNo / module，并统一三类标签。
+ * 幂等：已经对齐的笔记不会重复写库；不改正文、不删笔记。
+ */
+function migrateNoteTree() {
+  const all = db.prepare('SELECT * FROM notes').all().map(mapNote);
+  const inventoryModules = new Map();
+  for (const note of all) {
+    if (note.subjectId && Array.isArray(note.meta?.chapters) && note.meta.chapters.length) {
+      inventoryModules.set(note.subjectId, parseInventoryModules(note.content));
+    }
+  }
+  let updated = 0;
+  for (const note of all) {
+    const category = noteCategoryOf(note);
+    const modules = inventoryModules.get(note.subjectId) || [];
+    const match = category === 'inventory'
+      ? { moduleNo: null, module: '' }
+      : matchNoteModule(note, modules);
+    const tags = Array.isArray(note.tags) ? note.tags : [];
+    const kept = tags.filter((tag) => !SPECIAL_NOTE_TAGS.has(tag));
+    const nextTags = [...new Set([...kept, NOTE_TAGS[category]])];
+    const nextMeta = {
+      ...(note.meta && typeof note.meta === 'object' ? note.meta : {}),
+      kind: category,
+      category,
+      moduleNo: match.moduleNo,
+      module: match.module,
+    };
+    const tagsSame = nextTags.length === tags.length && nextTags.every((tag) => tags.includes(tag));
+    const metaSame = note.meta
+      && note.meta.kind === nextMeta.kind
+      && note.meta.category === nextMeta.category
+      && (note.meta.moduleNo ?? null) === nextMeta.moduleNo
+      && String(note.meta.module || '') === nextMeta.module;
+    if (tagsSame && metaSame) continue;
+    db.prepare('UPDATE notes SET tags = ?, meta = ? WHERE id = ?')
+      .run(JSON.stringify(nextTags), JSON.stringify(nextMeta), note.id);
+    updated += 1;
+  }
+  return { updated, total: all.length };
+}
+
+function noteBrief(note, category) {
+  return {
+    id: note.id,
+    title: note.title || '未命名笔记',
+    category,
+    moduleNo: note.meta?.moduleNo ?? null,
+    module: note.meta?.module || '',
+    updatedAt: note.updatedAt || '',
+    pinned: Boolean(note.pinned),
+    chars: String(note.content || '').length,
+    tags: note.tags || [],
+    sourceType: note.sourceType || null,
+    sourceLabel: note.sourceLabel || null,
+  };
+}
+
+/** 应用内笔记树：学科 → 知识清单 / 学科笔记 / 答疑笔记 → 模块 → 笔记 */
+function buildNoteTree(subjectList = []) {
+  const { items } = getNotes({ limit: 500 });
+  const bySubject = new Map();
+  for (const note of items) {
+    const key = note.subjectId || '';
+    if (!bySubject.has(key)) bySubject.set(key, []);
+    bySubject.get(key).push(note);
+  }
+  const entries = subjectList.map((subject) => ({
+    id: subject.id,
+    name: subject.name || '未命名科目',
+    notes: bySubject.get(subject.id) || [],
+  }));
+  if (bySubject.has('')) entries.push({ id: '', name: '未绑定学科', notes: bySubject.get('') });
+
+  return {
+    subjects: entries.map((entry) => {
+      const categories = entry.notes.map((note) => ({ note, category: noteCategoryOf(note) }));
+      const inventory = categories
+        .filter((item) => item.category === 'inventory')
+        .map((item) => item.note)
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0] || null;
+      const modules = inventory ? parseInventoryModules(inventory.content) : [];
+      const buckets = { subject: new Map(), qa: new Map() };
+      for (const { note, category } of categories) {
+        if (category === 'inventory') continue;
+        const key = note.meta?.moduleNo ?? 0;
+        if (!buckets[category].has(key)) buckets[category].set(key, []);
+        buckets[category].get(key).push(noteBrief(note, category));
+      }
+      const categoryNode = (category) => ({
+        modules: modules.map((module) => ({
+          no: module.no,
+          title: module.title,
+          fromPage: module.fromPage,
+          toPage: module.toPage,
+          notes: buckets[category].get(module.no) || [],
+        })),
+        unclassified: buckets[category].get(0) || [],
+      });
+      return {
+        id: entry.id,
+        name: entry.name,
+        counts: {
+          inventory: inventory ? 1 : 0,
+          subject: categories.filter((item) => item.category === 'subject').length,
+          qa: categories.filter((item) => item.category === 'qa').length,
+        },
+        inventory: inventory ? noteBrief(inventory, 'inventory') : null,
+        subject: categoryNode('subject'),
+        qa: categoryNode('qa'),
+      };
+    }),
+  };
 }
 
 function deriveNoteTitle(content) {
@@ -856,7 +1150,7 @@ function updateNoteContent(id, content) {
     .prepare('UPDATE notes SET content = @content, updated_at = CURRENT_TIMESTAMP WHERE id = @id')
     .run({ id, content: String(content ?? '') });
   if (!result.changes) throw new Error('笔记不存在或没有变化');
-  return mapNote(db.prepare('SELECT * FROM notes WHERE id = ?').get(id));
+  return afterNoteWrite(id);
 }
 
 function deleteNote(id) {
@@ -1173,6 +1467,14 @@ module.exports = {
   getNote,
   listNoteBriefs,
   updateNoteContent,
+  syncKnowledgeSummaryFromNote,
+  reconcileKnowledgeSummaries,
+  isInventoryNote,
+  noteCategoryOf,
+  parseInventoryModules,
+  matchNoteModule,
+  migrateNoteTree,
+  buildNoteTree,
   deleteNote,
   searchNotes,
   getNoteTags,

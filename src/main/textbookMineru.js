@@ -22,6 +22,7 @@ const textbookFigures = require('./textbookFigures.js');
 const mineruServer = require('./mineruServer.js');
 const runtimeEnv = require('./runtimeEnv.js');
 const parseProcesses = require('./parseProcesses.js');
+const { textQuality } = require('./textRepair.js');
 
 // 记录每个科目正在跑的解析子进程，供渲染层「停止解析」使用
 const activeChildren = new Map();
@@ -94,7 +95,10 @@ function parseContentList(contentList, imagesDir) {
     if (!byPage.has(page)) byPage.set(page, { lines: [], figures: [] });
 
     if (String(block?.type) === 'image' && block?.img_path) {
-      const absolute = imagesDir ? path.join(imagesDir, ...String(block.img_path).split('/')) : null;
+      // MinerU 2.x 的 img_path 形如 images/page_x_image_y.jpg，imagesDir 已经是 images/，
+      // 这里去掉路径里的目录层级，避免拼成 images/images/...
+      const relative = String(block.img_path).split('/').filter((part) => part && part !== '.' && part !== '..' && part !== 'images');
+      const absolute = imagesDir && relative.length ? path.join(imagesDir, ...relative) : null;
       if (absolute && fs.existsSync(absolute)) {
         const caption = extractCaption(list, index);
         byPage.get(page).figures.push({
@@ -109,6 +113,19 @@ function parseContentList(contentList, imagesDir) {
 
     const line = blockToMarkdown(block);
     if (line) byPage.get(page).lines.push(line);
+  }
+
+  // 带幽灵文字层的 PDF，图注里每个字之间也夹着乱码字（如「睏图睏2睏-睏6」），
+  // 直接送给 normalizeFigureNo 会解析失败、整本插图退化成 p<页码>。
+  // 用整页正文检测出的幽灵字符清洗图注后再定图号。
+  for (const [page, data] of byPage) {
+    const quality = textQuality(data.lines.join('\n'));
+    if (!quality.ghost || !quality.topChar) continue;
+    const ghost = quality.topChar;
+    for (const figure of data.figures) {
+      figure.caption = figure.caption.split(ghost).join('').trim();
+      figure.no = textbookFigures.normalizeFigureNo(figure.caption) || `p${page}`;
+    }
   }
   return byPage;
 }
@@ -147,7 +164,9 @@ function applyBatch({ subjectId, outDir, filename, fileName, total }) {
   const partPath = path.join(outDir, filename);
   if (!fs.existsSync(partPath)) return { pages: 0, figures: 0 };
   const list = JSON.parse(fs.readFileSync(partPath, 'utf8'));
-  const byPage = parseContentList(Array.isArray(list) ? list : [], null);
+  // MinerU 4.x 提取器已把 bbox 对应的插图裁到 <outDir>/images/，有才传
+  const imagesDir = path.join(outDir, 'images');
+  const byPage = parseContentList(Array.isArray(list) ? list : [], fs.existsSync(imagesDir) ? imagesDir : null);
   let figureCount = 0;
   for (const [pageNo, data] of byPage) {
     subjectTextbook.saveTextbookPage({
@@ -388,4 +407,4 @@ function cancelTextbook(subjectId) {
   }
 }
 
-module.exports = { detectMineru, parseTextbookLocal, cancelTextbook, mineru4ExtractScript, requireReadyEnv };
+module.exports = { detectMineru, parseTextbookLocal, cancelTextbook, mineru4ExtractScript, requireReadyEnv, applyBatch };

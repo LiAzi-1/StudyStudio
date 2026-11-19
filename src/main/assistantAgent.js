@@ -18,7 +18,7 @@ const { MATH_STYLE_PROMPT, normalizeMath } = require('../shared/mathStyle.js');
 // 模型忘了写 </action> 也要能救回来：闭合标签缺失时按「到文末」处理
 const ACTION_BLOCK_PATTERN = /<action>([\s\S]*?)(?:<\/action>|$)/i;
 
-const ACTION_TYPES = ['import_questions', 'add_wrong_questions', 'adjust_plan', 'write_notes', 'edit_note', 'update_subject_profile', 'add_subject', 'generate_inventory', 'import_textbook_questions', 'classify_questions'];
+const ACTION_TYPES = ['import_questions', 'add_wrong_questions', 'adjust_plan', 'write_notes', 'edit_note', 'update_subject_profile', 'add_subject', 'generate_inventory', 'import_textbook_questions', 'classify_questions', 'run_analysis_plugin'];
 
 const TODO_KINDS = ['vocab', 'essay', 'drill', 'note', 'custom'];
 
@@ -190,6 +190,15 @@ const ASSISTANT_SYSTEM_PROMPT = `你是学习平台里的「AI 助教」。你�
 - 只有该科目已有教材 / 知识清单时才能分类；教材没上传或没解析完，就先在正文里告诉用户去「科目」页上传教材，不要输出这个动作
 - 默认重新分类该科目下全部题目；用户明确说「只补缺失的分类」时把 onlyMissing 设为 true
 - 不要自己在正文里编造章节名或知识点，也不要把分类结果抄一遍
+
+### 9. 打开学科分析插件
+{
+  "type": "run_analysis_plugin",
+  "pluginId": "electrical-analysis"
+}
+- 只在 system 里明确列出了可用插件时才能用；插件负责读图、建模和代码计算，你不能自己算
+- 输出这个动作前，可以用一两句话说明将打开哪个插件；不要给出最终数值或完整解题过程
+- 每个插件一次只输出一个动作；用户没有要求分析时不要输出
 
 一次最多输出一个 <action> 块。需要多步操作时，先完成一步，让用户确认后再继续。
 不确定用户是否真的想执行时，用正文问一句，不要输出 <action> 块。
@@ -619,6 +628,12 @@ function normalizeAction(action) {
   if (!action || typeof action !== 'object') return null;
   const type = String(action.type || '').trim();
   if (!ACTION_TYPES.includes(type)) return null;
+
+  if (type === 'run_analysis_plugin') {
+    const pluginId = String(action.pluginId || '').trim().slice(0, 64);
+    if (!pluginId) return null;
+    return { type, pluginId };
+  }
 
   if (type === 'import_questions') {
     const questions = (Array.isArray(action.questions) ? action.questions : [])

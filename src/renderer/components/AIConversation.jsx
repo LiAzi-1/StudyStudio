@@ -80,7 +80,7 @@ function Modal({ title, children, onClose, footer }) {
   );
 }
 
-export default function AIConversation({ onNavigate, incomingSubjectId = '', onOpenSettings }) {
+export default function AIConversation({ onNavigate, incomingSubjectId = '', onOpenSettings, onOpenAnalysis }) {
   const { toast, confirm, prompt } = useDialog();
   const [subjects, setSubjects] = useState([]);
   const [sessions, setSessions] = useState([]);
@@ -109,6 +109,8 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
   const [versionPick, setVersionPick] = useState({});
   const [showJump, setShowJump] = useState(false);
   const [streamMode, setStreamMode] = useState('new');
+  // 当前科目可用的学科分析插件（按科目匹配 + 已启用）；为空时完全不出现入口
+  const [analysisPlugins, setAnalysisPlugins] = useState([]);
 
   const activeIdRef = useRef('');
   const loadingRef = useRef(false);
@@ -718,6 +720,24 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     }
   }, [activeId, toast]);
 
+  const effectiveSubjectId = useMemo(
+    () => sessions.find((item) => item.id === activeId)?.subject_id || subjectId || '',
+    [sessions, activeId, subjectId],
+  );
+
+  // 只有「科目匹配 + 插件启用」才拿得到插件；不需要时入口不出现
+  useEffect(() => {
+    let alive = true;
+    if (!effectiveSubjectId || !window.openexam?.plugins?.forSubject) {
+      setAnalysisPlugins([]);
+      return () => { alive = false; };
+    }
+    window.openexam.plugins.forSubject(effectiveSubjectId)
+      .then((res) => { if (alive) setAnalysisPlugins(res?.success ? (res.plugins || []) : []); })
+      .catch(() => { if (alive) setAnalysisPlugins([]); });
+    return () => { alive = false; };
+  }, [effectiveSubjectId]);
+
   const actionCtx = useMemo(() => ({
     subjectId: sessions.find((item) => item.id === activeId)?.subject_id || subjectId,
     subjects,
@@ -733,6 +753,8 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
     for (const message of messages) {
       const action = message.meta?.action;
       if (!action) continue;
+      // 打开插件不是写库动作，不生成执行计划，卡片里直接给入口
+      if (action.type === 'run_analysis_plugin') continue;
       if (message.meta.actionStatus && message.meta.actionStatus !== 'pending') continue;
       if (message.meta.actionPlan) continue;
       if (planBuildingRef.current.has(message.id)) continue;
@@ -871,7 +893,7 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
           sourceId: subjectId || null,
           sourceLabel: 'AI 助教',
           subjectId: subjectId || null,
-          meta: { kind: 'knowledge', subject: subject?.name || '' },
+          meta: { kind: 'qa', category: 'qa', subject: subject?.name || '' },
         });
         toast({ title: '已生成笔记', message: modal.title, tone: 'success' });
       }
@@ -1132,6 +1154,33 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
 
                     {reply.meta?.action ? (() => {
                       const action = reply.meta.action;
+                      // 学科分析插件：不是写库动作，给一个直接进入工作台的入口
+                      if (action.type === 'run_analysis_plugin') {
+                        const plugin = analysisPlugins.find((item) => item.id === action.pluginId);
+                        return (
+                          <div style={{ maxWidth: 'min(680px, 88%)', padding: 12, ...CARD, background: 'var(--surface-elevated)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 12, fontWeight: 700 }}>学科分析 · {plugin?.name || action.pluginId}</span>
+                              {plugin?.builtin ? <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 999, background: 'var(--accent-soft-bg)', color: 'var(--accent)', fontWeight: 600 }}>内置</span> : null}
+                            </div>
+                            <div style={{ marginTop: 4, fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.7 }}>
+                              由插件把题干/图片转成结构化中间结果并做确定性计算；数值以代码计算为准，模型只负责讲解。
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                              {plugin ? (
+                                <button
+                                  type="button"
+                                  style={BTN(true)}
+                                  onClick={() => onOpenAnalysis?.(action.pluginId, { text: String(user?.content || ''), images: [] })}
+                                >打开分析工作台</button>
+                              ) : (
+                                <span style={{ fontSize: 11, color: 'var(--muted)' }}>该插件在当前科目不可用（未匹配或已禁用）</span>
+                              )}
+                              <button type="button" style={BTN(false)} onClick={() => ignoreAction(reply)}>取消</button>
+                            </div>
+                          </div>
+                        );
+                      }
                       const plan = reply.meta.actionPlan || null;
                       const planChoice = planChoices[reply.id];
                       const choiceValue = plan && planChoice?.field === plan.choiceField ? planChoice.value : '';
@@ -1225,6 +1274,25 @@ export default function AIConversation({ onNavigate, incomingSubjectId = '', onO
             await addImages(extractDroppedImages(event));
           }}
         >
+          {analysisPlugins.length && onOpenAnalysis ? (
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: 10.5, color: 'var(--muted)' }}>学科分析：</span>
+              {analysisPlugins.map((plugin) => (
+                <button
+                  key={plugin.id}
+                  type="button"
+                  onClick={() => onOpenAnalysis(plugin.id, {
+                    text: input || String(pinnedContext?.content || ''),
+                    images,
+                  })}
+                  style={{ ...BTN(false), padding: '4px 9px', fontSize: 11 }}
+                  title={plugin.description}
+                >
+                  用「{plugin.name}」分析本题
+                </button>
+              ))}
+            </div>
+          ) : null}
           {images.length ? (
             <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
               {images.map((image, index) => (

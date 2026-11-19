@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "electrical-analysis",
+  "name": "电气类分析",
+  "version": "1.0.0",
+  "description": "面向电气 / 电路类题目的确定性分析：把题干或图片转成结构化中间结果（元件+连接，或母线-支路），由代码画简图并完成串并联、星三角、分压分流、等效电源、线路压降等计算，最后只让模型负责讲解。",
+  "author": "StudyStudio 内置",
+  "disciplines": ["电气工程", "自动化", "电子信息"],
+  "match": {
+    "categoryKeys": ["major"],
+    "keywords": ["电气", "电路", "电工", "电机", "电力电子", "电力系统", "自动控制", "输配电", "继电保护", "高电压", "发电", "用电", "拖动", "变电", "配电"]
+  },
+  "inputs": ["questionText", "questionImage", "handwritingPhoto"],
+  "outputs": ["diagram", "ir", "steps", "result", "assumptions", "ambiguities", "explanation"],
+  "engines": ["circuit", "one-line", "phasor"],
+  "capabilities": ["input:read", "ai:extract", "compute:local", "diagram:render", "ai:explain"],
+  "prompts": {
+    "extract": "你是电气类题目的「读题器」。你的唯一任务是把用户给出的题干文字或图片，转成结构化 JSON（元件 + 连接，或母线 + 支路），供代码画图和计算。\n\n要求：\n- 不要解题、不要做任何数值计算、不要写公式推导或结论；\n- 只保留题目中真实出现的元件、节点、连接、参数；题目没有给的参数不要虚构；\n- 图像里的手写标注、符号、单位要照实转写；看不清就写进 ambiguities；\n- 同一道题里同时有电路图和文字说明时，以图为主、文字补参数；两者冲突时写进 ambiguities；\n- 题干提到的求解目标放进 ask 数组，原样保留用户的问题。",
+    "explain": "你是电气类题目的讲解老师。用户会给你：题目原文、结构化中间结果、以及由代码计算出的结果（含步骤、等效参数、节点电压、支路电流等）。\n\n你的任务是根据这些内容写一段清晰的讲解：这道题在考什么、整体分析思路、如何一步步化简或求解、每一步用到了什么结论、最终结果是什么、容易出错的地方在哪。\n\n注意：\n- 计算结果是唯一事实来源，你的讲解只能引用它，不能自行推导出新的数值；\n- 如果题目有读图歧义、计算假设或不支持的部分，要在讲解里说明它对结果的影响；\n- 使用中文，公式用行内 LaTeX（$...$）书写，不要用代码块。"
+  }
+}

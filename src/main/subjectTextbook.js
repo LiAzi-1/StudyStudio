@@ -521,6 +521,7 @@ async function generateTextbookQuestions({ subjectId, settings, signal, onProgre
           ? {
             ...question,
             __sourcePage: sourcePageOf(question),
+            __pageSpan: span,
             __fromTextbook: chunk.source.fromTextbook,
             __sourceName: chunk.source.name || '',
           }

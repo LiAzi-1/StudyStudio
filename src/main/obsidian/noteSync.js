@@ -20,13 +20,13 @@ const { normalizeMath } = require('../../shared/mathStyle.js');
 
 /** 这些属性由同步器自己维护，每次推送都重算，不从旧文件继承 */
 const OWNED_KEYS = new Set([
-  'title', 'date', 'tags', 'source',
+  'title', 'date', 'tags', 'source', 'subject',
   'app_note_id', 'app_updated_at', 'app_synced_at',
 ]);
 
 /** AI 整理产出的分类属性：应用自己生成的笔记不该继承 vault 里的旧值 */
 const CLASSIFICATION_KEYS = new Set([
-  'summary', 'knowledge_points', 'knowledge_labels', 'subject', 'topic',
+  'summary', 'knowledge_points', 'knowledge_labels', 'topic',
   'note_type', 'difficulty', 'mastery', 'key_concepts',
   'ai_tutor', 'ai_model', 'ai_fallback', 'ai_at',
 ]);
@@ -104,6 +104,45 @@ function noteFileName(note) {
   return `${title}-${String(note.id || '').slice(0, 6)}.md`;
 }
 
+/** 与应用内笔记树一致的三类划分 */
+const CATEGORY_FOLDER = { inventory: '知识清单', subject: '学科笔记', qa: '答疑笔记' };
+
+function noteCategory(note) {
+  const meta = note?.meta && typeof note.meta === 'object' ? note.meta : {};
+  if (['inventory', 'subject', 'qa'].includes(meta.category)) return meta.category;
+  if (Array.isArray(meta.chapters) && meta.chapters.length) return 'inventory';
+  const tags = Array.isArray(note?.tags) ? note.tags : [];
+  if (tags.includes('答疑笔记')) return 'qa';
+  return 'subject';
+}
+
+function subjectLabel(note, subjectName) {
+  const name = subjectName?.get(String(note.subjectId))
+    || (note.meta && typeof note.meta === 'object' ? note.meta.subject : '')
+    || '未绑定学科';
+  return V.safeName(name, 40) || '未绑定学科';
+}
+
+function moduleLabel(note) {
+  const no = Number(note.meta?.moduleNo) || 0;
+  const title = V.safeName(note.meta?.module || '', 40);
+  return no > 0 && title && title !== 'unnamed' ? `${no}. ${title}` : '未归类';
+}
+
+/**
+ * 笔记在 vault 里的目录：
+ *   应用笔记/<学科>/知识清单/
+ *   应用笔记/<学科>/学科笔记/<模块>/
+ *   应用笔记/<学科>/答疑笔记/<模块>/
+ */
+function noteFolder(note, subjectName) {
+  const category = noteCategory(note);
+  const parts = [subjectLabel(note, subjectName), CATEGORY_FOLDER[category]];
+  if (category !== 'inventory') parts.push(moduleLabel(note));
+  return parts;
+}
+
+
 function relativeFile(vaultDir, absolute) {
   return path.relative(vaultDir, absolute).split(path.sep).join('/');
 }
@@ -140,15 +179,138 @@ function metaToFrontmatter(meta) {
   return fields;
 }
 
+/* ------------------------------------------------------- 学科思维导图 */
+
+function mermaidLabel(text) {
+  return String(text || '')
+    .replace(/[\[\](){}"#<>`|*]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || '未命名';
+}
+
+function wikiLink(relFile, title) {
+  const target = String(relFile || '').replace(/\.md$/i, '');
+  return `[[${target}|${String(title || '').replace(/[|\]]/g, ' ')}]]`;
+}
+
+function moduleSort(a, b) {
+  const na = parseInt(a, 10);
+  const nb = parseInt(b, 10);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  if (Number.isFinite(na)) return -1;
+  if (Number.isFinite(nb)) return 1;
+  return a.localeCompare(b, 'zh');
+}
+
+/**
+ * 每个学科写一份「思维导图.md」，层级与应用内一致：
+ * 学科 → 知识清单 / 学科笔记 / 答疑笔记 → 章节 → 笔记
+ */
+function writeSubjectMindmaps({ vaultDir, notes, subjects }) {
+  const subjectName = new Map((subjects || []).map((s) => [String(s.id), s.name]));
+  const groups = new Map();
+
+  for (const note of notes || []) {
+    if (!note?.id) continue;
+    const key = String(note.subjectId || '') || `name:${subjectLabel(note, subjectName)}`;
+    if (!groups.has(key)) {
+      groups.set(key, { name: subjectLabel(note, subjectName), inventory: null, subject: new Map(), qa: new Map() });
+    }
+    const group = groups.get(key);
+    const rel = `${V.DIR.appNotes}/${noteFolder(note, subjectName).join('/')}/${noteFileName(note)}`;
+    const category = noteCategory(note);
+    if (category === 'inventory') {
+      if (!group.inventory || String(note.updatedAt || '') > String(group.inventory.note.updatedAt || '')) {
+        group.inventory = { note, rel };
+      }
+      continue;
+    }
+    const label = moduleLabel(note);
+    const bucket = group[category];
+    if (!bucket.has(label)) bucket.set(label, []);
+    bucket.get(label).push({ note, rel });
+  }
+
+  const written = [];
+  for (const group of groups.values()) {
+    if (!group.inventory && !group.subject.size && !group.qa.size) continue;
+    const subjectDir = path.join(vaultDir, ...V.DIR.appNotes.split('/'), group.name);
+    const lines = ['---', 'source: openexam-app', 'app_mindmap: true', `subject: ${group.name}`,
+      `app_synced_at: ${new Date().toISOString()}`, '---', '', `# ${group.name} · 笔记思维导图`, ''];
+    const modulesOf = (bucket) => [...bucket.keys()].sort(moduleSort);
+    const hasQa = group.qa.size > 0;
+    const hasSubject = group.subject.size > 0;
+
+    lines.push('```mermaid', 'mindmap', `  root((${mermaidLabel(group.name)}))`);
+    if (group.inventory) {
+      lines.push('    知识清单', `      ${mermaidLabel(group.inventory.note.title)}`);
+    }
+    if (hasSubject) {
+      lines.push('    学科笔记');
+      for (const label of modulesOf(group.subject)) {
+        lines.push(`      ${mermaidLabel(label)}`);
+        for (const item of group.subject.get(label)) lines.push(`        ${mermaidLabel(item.note.title)}`);
+      }
+    }
+    if (hasQa) {
+      lines.push('    答疑笔记');
+      for (const label of modulesOf(group.qa)) {
+        lines.push(`      ${mermaidLabel(label)}`);
+        for (const item of group.qa.get(label)) lines.push(`        ${mermaidLabel(item.note.title)}`);
+      }
+    }
+    lines.push('```', '', '## 知识清单', '');
+    if (group.inventory) {
+      lines.push(`- ${wikiLink(group.inventory.rel, group.inventory.note.title)}`, '');
+    } else {
+      lines.push('- 暂无', '');
+    }
+    for (const [heading, bucket] of [['学科笔记', group.subject], ['答疑笔记', group.qa]]) {
+      lines.push(`## ${heading}`, '');
+      if (!bucket.size) {
+        lines.push('- 暂无', '');
+        continue;
+      }
+      for (const label of modulesOf(bucket)) {
+        lines.push(`### ${label}`, '');
+        for (const item of bucket.get(label)) lines.push(`- ${wikiLink(item.rel, item.note.title)}`);
+        lines.push('');
+      }
+    }
+
+    fs.mkdirSync(subjectDir, { recursive: true });
+    const file = path.join(subjectDir, '思维导图.md');
+    V.writeFileAtomic(file, `${lines.join('\n').trim()}\n`);
+    written.push(relativeFile(vaultDir, file));
+  }
+
+  // 学科清空后，把遗留的导图删掉（只动同步器自己写的那种）
+  const root = path.join(vaultDir, ...V.DIR.appNotes.split('/'));
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(root, entry.name, '思维导图.md');
+    const rel = relativeFile(vaultDir, file);
+    if (written.includes(rel)) continue;
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      if (text.includes('app_mindmap: true')) fs.unlinkSync(file);
+    } catch { /* 没有就算了 */ }
+  }
+  return written.length;
+}
+
 /* ------------------------------------------------------------------ 推送 */
 
 function pushNotes({ vaultDir, notes, subjects }) {
   V.ensureVault(vaultDir);
   const state = loadState(vaultDir);
   const subjectName = new Map((subjects || []).map((s) => [String(s.id), s.name]));
-
-  const dir = path.join(vaultDir, V.DIR.appNotes);
-  fs.mkdirSync(dir, { recursive: true });
 
   let written = 0;
   let skipped = 0;
@@ -161,7 +323,8 @@ function pushNotes({ vaultDir, notes, subjects }) {
     if (!id) continue;
     liveIds.add(id);
 
-    const target = path.join(dir, noteFileName(note));
+    const folder = noteFolder(note, subjectName);
+    const target = path.join(vaultDir, ...V.DIR.appNotes.split('/'), ...folder, noteFileName(note));
     const tags = Array.isArray(note.tags) ? note.tags : [];
     const digest = noteDigest(note);
     const record = state.notes[id];
@@ -215,6 +378,7 @@ function pushNotes({ vaultDir, notes, subjects }) {
 
     // 镜像进 Obsidian 前统一公式写法：存量笔记没重新保存过也能在 vault 里正确渲染
     const body = `${normalizeMath(String(note.content || '').trim()).text.trim()}\n`;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
     V.writeFileAtomic(target, fm.dump(meta) + body);
 
     state.notes[id] = {
@@ -269,7 +433,8 @@ function pushNotes({ vaultDir, notes, subjects }) {
 
   state.lastRun = new Date().toISOString();
   saveState(vaultDir, state);
-  return { written, skipped, removed };
+  const mindmaps = writeSubjectMindmaps({ vaultDir, notes, subjects });
+  return { written, skipped, removed, mindmaps };
 }
 
 /* ------------------------------------------------------------------ 拉取 */
@@ -473,4 +638,7 @@ module.exports = {
   parseDbTime,
   noteFileName,
   noteDigest,
+  noteCategory,
+  noteFolder,
+  writeSubjectMindmaps,
 };

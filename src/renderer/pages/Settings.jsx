@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { DEFAULT_AI_SETTINGS, normalizeAISettings } from '../store/aiSettings.js';
 import AIConfigPanel from '../components/AIConfigPanel.jsx';
 import RuntimeEnvPanel from '../components/RuntimeEnvPanel.jsx';
+import PluginManager from '../components/PluginManager.jsx';
 import appLogo from '../assets/openexam-app-icon.png';
 import { useDialog } from '../components/DialogProvider.jsx';
 import {
@@ -102,6 +103,15 @@ const NavIcon = ({ type }) => {
       </svg>
     );
   }
+  if (type === 'plugins') {
+    return (
+      <svg {...common}>
+        <path d="M9 3v4M15 3v4" />
+        <path d="M6 7h12v6a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+        <path d="M10 21h4" />
+      </svg>
+    );
+  }
   return (
     <svg {...common}>
       <circle cx="12" cy="12" r="9" />
@@ -111,7 +121,7 @@ const NavIcon = ({ type }) => {
   );
 };
 
-export default function Settings({ onBack, profile, initialSection = 'ai', onProfileSaved }) {
+export default function Settings({ onBack, profile, initialSection = 'ai', onProfileSaved, onOpenAnalysis }) {
   const [settings, setSettings] = useState(DEFAULT_AI_SETTINGS);
   const [showKey, setShowKey] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
@@ -691,6 +701,7 @@ export default function Settings({ onBack, profile, initialSection = 'ai', onPro
   const navItems = [
     { id: 'profile', label: '个人资料', icon: <NavIcon type="user" /> },
     { id: 'ai', label: 'AI 模型', icon: <NavIcon type="ai" /> },
+    { id: 'plugins', label: '学科插件', icon: <NavIcon type="plugins" /> },
     { id: 'runtime', label: '运行环境', icon: <NavIcon type="runtime" /> },
     { id: 'import', label: '导入设置', icon: <NavIcon type="import" /> },
     { id: 'display', label: '显示设置', icon: <NavIcon type="display" /> },
@@ -738,6 +749,10 @@ export default function Settings({ onBack, profile, initialSection = 'ai', onPro
 
         {/* Content Area */}
         <div style={{ display: "flex", flexDirection: "column", gap: 24, overflow: "auto", paddingRight: 8 }}>
+          {activeSection === 'plugins' && (
+            <PluginManager onOpenAnalysis={onOpenAnalysis} />
+          )}
+
           {activeSection === 'profile' && (
             <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
               <div>

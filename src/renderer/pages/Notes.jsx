@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDialog } from "../components/DialogProvider.jsx";
 import ObsidianSyncBar from "../components/ObsidianSyncBar.jsx";
+import { NoteSubjectGrid, NoteTreeView } from "../components/NoteTree.jsx";
 
 const SOURCE_LABEL = {
   question: "题目",
@@ -145,25 +146,38 @@ export default function Notes({ initialDraft = null, onBack }) {
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [openingObs, setOpeningObs] = useState("");
+  const [tree, setTree] = useState(null);
+  const [treeLoading, setTreeLoading] = useState(true);
+  const [activeSubjectId, setActiveSubjectId] = useState(null);
 
   const load = useCallback(async (kw = keyword, tag = activeTag) => {
     if (!window.openexam?.note) return;
+    const isSearch = kw.trim().length > 0;
     setLoading(true);
+    if (!isSearch) setTreeLoading(true);
     try {
-      const [res, tagList] = await Promise.all([
-        kw.trim()
+      const [res, tagList, treeRes] = await Promise.all([
+        isSearch
           ? window.openexam.note.search(kw, { limit: 100 })
           : window.openexam.note.list({ limit: 200, tag: tag || undefined }),
         window.openexam.note.tags(),
+        isSearch ? null : window.openexam.note.tree(),
       ]);
       setNotes(res?.items || []);
       setTags(Array.isArray(tagList) ? tagList : []);
+      if (treeRes) setTree(treeRes);
     } catch (error) {
       console.error("加载笔记失败:", error);
     } finally {
       setLoading(false);
+      setTreeLoading(false);
     }
   }, [keyword, activeTag]);
+
+  const activeSubject = useMemo(() => {
+    if (activeSubjectId === null || !tree?.subjects) return null;
+    return tree.subjects.find((item) => item.id === activeSubjectId) || null;
+  }, [activeSubjectId, tree]);
 
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -178,7 +192,21 @@ export default function Notes({ initialDraft = null, onBack }) {
   }, [initialDraft]);
 
   // 新建时就把 ID 定下来：图片要按笔记 ID 落盘，不能等保存后才生成
-  const createNote = () => setSelected({ id: genNoteId(), content: "", tags: [] });
+  // 在某个学科下新建时，顺手把学科绑定和分类带上，笔记直接落进该学科的树里
+  const createNote = (subject = null) => setSelected({
+    id: genNoteId(),
+    content: "",
+    tags: subject?.name ? [subject.name] : [],
+    subjectId: subject?.id || null,
+    meta: subject?.id ? { category: "subject", subject: subject.name } : undefined,
+  });
+
+  /** 树里只有摘要，打开时再拉全文 */
+  const openNoteById = useCallback(async (id) => {
+    if (!id) return;
+    const full = await window.openexam.note.get(id);
+    if (full) setSelected(full);
+  }, []);
 
   const handleSaved = async () => {
     setSelected(null);
@@ -271,6 +299,8 @@ export default function Notes({ initialDraft = null, onBack }) {
   }, [dialog]);
 
   const searching = keyword.trim().length > 0;
+  // 搜索或按标签筛选时回退成平铺列表，其余时候走「学科 → 树状图」
+  const flatMode = searching || Boolean(activeTag);
 
   return (
     <div className="notes-page">
@@ -285,7 +315,7 @@ export default function Notes({ initialDraft = null, onBack }) {
             <Icon path={MapIcon} size={15} />
             <span>知识地图</span>
           </button>
-          <button type="button" className="notes-new" onClick={createNote}>
+          <button type="button" className="notes-new" onClick={() => createNote(activeSubject)}>
             <Icon path={PlusIcon} size={15} />
             <span>新建笔记</span>
           </button>
@@ -328,73 +358,88 @@ export default function Notes({ initialDraft = null, onBack }) {
         </div>
       )}
 
-      {loading ? (
-        <div className="notes-empty">加载中…</div>
-      ) : notes.length === 0 ? (
-        <div className="notes-empty">
-          {searching ? (
-            <>没搜到「{keyword}」相关的笔记</>
-          ) : (
-            <>
-              <strong>还没有笔记</strong>
-              <span>刷题时想到什么、专业课漏了哪个点，随手记一条，以后能搜回来。</span>
-              <button type="button" onClick={createNote}>记第一条</button>
-            </>
-          )}
-        </div>
-      ) : (
-        <div className="notes-grid">
-          {notes.map((note) => (
-            <article key={note.id} className={`note-card${note.pinned ? " is-pinned" : ""}`} onClick={() => setSelected(note)}>
-              <div className="note-card-head">
-                <h3>{note.title || "未命名笔记"}</h3>
-                <div className="note-card-tools" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    className={openingObs === note.id ? "is-on" : ""}
-                    onClick={() => openInObsidian(note)}
-                    aria-label="在 Obsidian 中打开"
-                    title="在 Obsidian 中打开这篇笔记"
-                    disabled={openingObs === note.id}
-                  >
-                    <Icon path={ExternalIcon} size={14} />
-                  </button>
-                  <button type="button" className={note.pinned ? "is-on" : ""} onClick={() => togglePin(note)} aria-label="置顶">
-                    <Icon path={PinIcon} size={14} />
-                  </button>
-                  <button type="button" onClick={() => removeNote(note)} aria-label="删除">
-                    <Icon path={TrashIcon} size={14} />
-                  </button>
+      {flatMode ? (
+        loading ? (
+          <div className="notes-empty">加载中…</div>
+        ) : notes.length === 0 ? (
+          <div className="notes-empty">
+            {searching ? (
+              <>没搜到「{keyword}」相关的笔记</>
+            ) : (
+              <>
+                <strong>还没有笔记</strong>
+                <span>刷题时想到什么、专业课漏了哪个点，随手记一条，以后能搜回来。</span>
+                <button type="button" onClick={() => createNote(activeSubject)}>记第一条</button>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="notes-grid">
+            {notes.map((note) => (
+              <article key={note.id} className={`note-card${note.pinned ? " is-pinned" : ""}`} onClick={() => setSelected(note)}>
+                <div className="note-card-head">
+                  <h3>{note.title || "未命名笔记"}</h3>
+                  <div className="note-card-tools" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className={openingObs === note.id ? "is-on" : ""}
+                      onClick={() => openInObsidian(note)}
+                      aria-label="在 Obsidian 中打开"
+                      title="在 Obsidian 中打开这篇笔记"
+                      disabled={openingObs === note.id}
+                    >
+                      <Icon path={ExternalIcon} size={14} />
+                    </button>
+                    <button type="button" className={note.pinned ? "is-on" : ""} onClick={() => togglePin(note)} aria-label="置顶">
+                      <Icon path={PinIcon} size={14} />
+                    </button>
+                    <button type="button" onClick={() => removeNote(note)} aria-label="删除">
+                      <Icon path={TrashIcon} size={14} />
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              {note.snippet
-                ? <Snippet text={note.snippet} />
-                : (
-                  <p className="note-card-body">
-                    {String(note.content || "").replace(IMAGE_RE, " ").replace(/^#{1,4}\s+/gm, "").slice(0, 140)}
-                  </p>
-                )}
+                {note.snippet
+                  ? <Snippet text={note.snippet} />
+                  : (
+                    <p className="note-card-body">
+                      {String(note.content || "").replace(IMAGE_RE, " ").replace(/^#{1,4}\s+/gm, "").slice(0, 140)}
+                    </p>
+                  )}
 
-              <MetaChips meta={note.meta} compact />
+                <MetaChips meta={note.meta} compact />
 
-              <footer className="note-card-foot">
-                {note.sourceType && (
-                  <span className="note-card-source">
-                    {SOURCE_LABEL[note.sourceType] || note.sourceType}
-                    {note.sourceLabel ? ` · ${note.sourceLabel}` : ""}
-                  </span>
-                )}
-                {(() => {
-                  const count = collectImages(note.content).length;
-                  return count > 0 ? <span className="note-card-tag">图 {count}</span> : null;
-                })()}
-                {note.tags.map((tag) => <span key={tag} className="note-card-tag">{tag}</span>)}
-                <time>{relTime(note.updatedAt)}</time>
-              </footer>
-            </article>
-          ))}
-        </div>
+                <footer className="note-card-foot">
+                  {note.sourceType && (
+                    <span className="note-card-source">
+                      {SOURCE_LABEL[note.sourceType] || note.sourceType}
+                      {note.sourceLabel ? ` · ${note.sourceLabel}` : ""}
+                    </span>
+                  )}
+                  {(() => {
+                    const count = collectImages(note.content).length;
+                    return count > 0 ? <span className="note-card-tag">图 {count}</span> : null;
+                  })()}
+                  {note.tags.map((tag) => <span key={tag} className="note-card-tag">{tag}</span>)}
+                  <time>{relTime(note.updatedAt)}</time>
+                </footer>
+              </article>
+            ))}
+          </div>
+        )
+      ) : activeSubject ? (
+        <NoteTreeView
+          key={activeSubject.id || "unbound"}
+          subject={activeSubject}
+          onBack={() => setActiveSubjectId(null)}
+          onOpenNote={openNoteById}
+        />
+      ) : (
+        <NoteSubjectGrid
+          subjects={tree?.subjects || []}
+          loading={treeLoading}
+          onPick={(subject) => setActiveSubjectId(subject.id)}
+        />
       )}
 
       {selected && (
@@ -444,12 +489,18 @@ export function NoteEditor({ note, onClose, onSaved }) {
 
   /** 只写库、不关闭编辑器：编辑器里点「在 Obsidian 中打开」时先落盘用 */
   const flush = useCallback(async () => {
+    // 手写 / AI 整理（没带分类）的笔记统一归入学科笔记；清单笔记保持 inventory
+    const nextMeta = { ...(meta || {}) };
+    if (!nextMeta.category) {
+      nextMeta.category = Array.isArray(nextMeta.chapters) && nextMeta.chapters.length ? 'inventory' : 'subject';
+    }
     return window.openexam.note.save({
       id: noteId,
       title: titleOverride || undefined,
       content,
       tags: tagInput,
-      meta,
+      meta: nextMeta,
+      subjectId: note.subjectId || undefined,
       sourceType: note.sourceType,
       sourceId: note.sourceId,
       sourceLabel: note.sourceLabel,

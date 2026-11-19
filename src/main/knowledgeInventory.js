@@ -524,7 +524,21 @@ function findExistingNote(database, subjectId) {
   try {
     const result = database.getNotes({ subjectId, limit: 100 });
     const items = Array.isArray(result?.items) ? result.items : [];
-    return items.find((note) => /知识清单/.test(String(note.title || '')) && String(note.content || '').trim()) || null;
+    // 清单笔记的标题可能被编辑器/Obsidian 改写，识别以 type/meta 和正文结构为准；
+    // 标题只作最后的兜底，避免重复新建一份清单。
+    const score = (note) => {
+      const meta = note?.meta && typeof note.meta === 'object' ? note.meta : null;
+      if (meta && Array.isArray(meta.chapters) && meta.chapters.length) return 3;
+      if (/^##\s*模块\s*\d+/m.test(String(note?.content || ''))) return 2;
+      if (/知识清单/.test(String(note?.title || ''))) return 1;
+      return 0;
+    };
+    return items
+      .filter((note) => String(note.content || '').trim())
+      .map((note) => ({ note, score: score(note) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || String(b.note.content).length - String(a.note.content).length)
+      .map((item) => item.note)[0] || null;
   } catch (error) {
     console.warn('[Inventory] 读取旧清单失败:', error?.message || error);
     return null;
@@ -1163,7 +1177,8 @@ async function generateKnowledgeInventory(options = {}) {
     sourceLabel: sourceInfo.type === 'primary' ? '教材解析' : '补充资料',
     subjectId: subject.id,
     meta: {
-      kind: 'knowledge',
+      kind: 'inventory',
+      category: 'inventory',
       subject: subject.name,
       generatedAt: new Date().toISOString(),
       source: { key: sourceInfo.key, type: sourceInfo.type, name: sourceInfo.name, totalPages: sourceInfo.totalPages },

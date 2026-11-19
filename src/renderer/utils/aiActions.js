@@ -48,13 +48,13 @@ async function writeNotes(action, ctx) {
       title: note.title,
       content: note.content,
       tags: subject
-        ? [subject.name, note.kind === 'knowledge' ? '知识清单' : note.kind === 'plan' ? '学习计划' : note.kind === 'daily' ? '每日学习' : '总结']
+        ? [subject.name, note.kind === 'plan' ? '学习计划' : note.kind === 'daily' ? '每日学习' : note.kind === 'summary' ? '总结' : '学科笔记']
         : ['AI 助教'],
       sourceType: 'subject',
       sourceId: subjectId || null,
       sourceLabel: 'AI 助教',
       subjectId,
-      meta: { kind: note.kind, subject: subject?.name || '' },
+      meta: { kind: note.kind, category: 'subject', subject: subject?.name || '' },
     });
     saved.push(row?.id || '');
   }
@@ -554,6 +554,11 @@ async function buildActionPlan(action, ctx = {}) {
         .map(([key, value]) => `${key}：${value}`);
       plan.write = ['科目资料：学习基础 / 可用时间'];
       plan.cost = ['本地写入，不调用模型'];
+    } else if (action.type === 'run_analysis_plugin') {
+      plan.target = `学科分析插件：${action.pluginId}`;
+      plan.scope = ['打开分析工作台', '模型只做结构化识别与讲解，数值由插件代码计算'];
+      plan.write = [];
+      plan.cost = ['识别会调用一次当前 AI 配置；计算在本地完成'];
     } else if (action.type === 'add_subject') {
       plan.target = `新科目《${action.name}》`;
       plan.scope = ['创建科目', action.examDate ? `考试日期：${action.examDate}` : '未设置考试日期', '创建后绑定到当前对话'];
@@ -581,6 +586,7 @@ async function applyAIAction(action, ctx = {}) {
     case 'update_subject_profile': return subjectProfile(action, ctx);
     case 'add_subject': return addSubject(action, ctx);
     case 'classify_questions': return classifyQuestions(action, ctx);
+    case 'run_analysis_plugin': return '已打开学科分析插件，请在分析工作台里核对结构与结果。';
     default: throw new Error(`暂不支持的动作：${action.type}`);
   }
 }
@@ -596,6 +602,7 @@ const ACTION_LABELS = {
   update_subject_profile: '存档学习基础',
   add_subject: '创建科目',
   classify_questions: '按知识图谱分类',
+  run_analysis_plugin: '打开学科分析插件',
 };
 
 function describeAction(action) {

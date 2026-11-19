@@ -200,10 +200,11 @@ function hasFigureHint(text) {
   return /如图|见图|下图|上图|左图|右图|图中|附图|题图|图\s*[一二三四五六七八九十\d]/.test(String(text || ''));
 }
 
-/* ---------------- 图号 / 题干 → 教材页码（避免把整页图挂错页） ---------------- */
+/* ---------------- 图号 → 插图索引 ---------------- */
 
 const textCache = new Map();
 
+/** 教材全文（带页标记），供助教检索与页码定位复用 */
 function textbookText(subjectId) {
   const file = path.join(subjectTextbookRoot(subjectId), '教材全文.md');
   const stat = fs.statSync(file);
@@ -212,7 +213,7 @@ function textbookText(subjectId) {
   const { repairGhostText } = require('./textRepair.js');
   const text = repairGhostText(fs.readFileSync(file, 'utf8')).text;
   const markers = [...text.matchAll(/<!--\s*第\s*(\d+)\s*页/g)].map((m) => ({ index: m.index, page: Number(m[1]) }));
-  const entry = { mtimeMs: stat.mtimeMs, text, markers, squashed: null, norm: null };
+  const entry = { mtimeMs: stat.mtimeMs, text, markers };
   // 只缓存最近 2 本教材，避免长期驻留多份全文
   if (textCache.size >= 2 && !textCache.has(file)) {
     textCache.delete(textCache.keys().next().value);
@@ -221,109 +222,53 @@ function textbookText(subjectId) {
   return entry;
 }
 
-function pageAt(entry, originalIndex) {
-  let page = null;
-  for (const marker of entry.markers) {
-    if (marker.index <= originalIndex) page = marker.page;
-    else break;
-  }
-  return page;
+function figureRecords(subjectId) {
+  const index = loadIndex(subjectId);
+  return index.figures.filter((figure) => fs.existsSync(path.join(assetDir(subjectId), `${figure.id}${IMAGE_EXT}`)));
 }
 
-/** 「图 2-5」在教材正文里第一次出现的位置 → 页码 */
-function pageByFigureNo(subjectId, no) {
-  const match = String(no || '').match(/(\d+)\s*[-.．—–]\s*(\d+)/);
-  if (!match) return null;
-  try {
-    const entry = textbookText(subjectId);
-    if (!entry.squashed) {
-      let value = '';
-      const map = [];
-      for (let i = 0; i < entry.text.length; i += 1) {
-        if (/\s/.test(entry.text[i])) continue;
-        value += entry.text[i];
-        map.push(i);
-      }
-      entry.squashed = { value, map };
-    }
-    const head = match[1];
-    const num = match[2];
-    const occurrences = [];
-    for (const variant of [`图${head}-${num}`, `图${head}.${num}`, `图${head}．${num}`, `图${head}—${num}`]) {
-      let from = 0;
-      while (occurrences.length < 20) {
-        const at = entry.squashed.value.indexOf(variant, from);
-        if (at < 0) break;
-        occurrences.push(entry.squashed.map[at]);
-        from = at + variant.length;
-      }
-    }
-    if (!occurrences.length) return null;
-    occurrences.sort((a, b) => a - b);
-    // 优先取「图 2-5 xxx」这种图题行（同一页可能有正文引用，图题更接近插图本身）
-    const caption = occurrences.find((originalIndex) => {
-      const lineStart = entry.text.lastIndexOf('\n', originalIndex) + 1;
-      const lineEnd = entry.text.indexOf('\n', originalIndex);
-      const line = entry.text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd).trim();
-      return line.replace(/\s+/g, '').startsWith('图') && line.length <= 60;
-    });
-    return pageAt(entry, caption !== undefined ? caption : occurrences[occurrences.length - 1]);
-  } catch { /* 没有教材全文就放弃 */ }
-  return null;
+/** 题目所在块的页范围（本章页范围），拿不到就是 null */
+function pageSpanOf(question) {
+  const from = Number(question?.__pageSpan?.from) || 0;
+  const to = Number(question?.__pageSpan?.to) || 0;
+  return from && to ? { from: Math.min(from, to), to: Math.max(from, to) } : null;
 }
 
-/** 无图号引用：用题干原文在教材里定位，找不到就不挂图，绝不猜页 */
-function pageByQuestionText(subjectId, content) {
-  try {
-    const entry = textbookText(subjectId);
-    if (!entry.norm) {
-      let value = '';
-      const map = [];
-      let inMath = false;
-      for (let i = 0; i < entry.text.length; i += 1) {
-        const ch = entry.text[i];
-        if (ch === '$') { inMath = !inMath; continue; }
-        if (inMath) continue;
-        if (!/[\u4e00-\u9fa5A-Za-z0-9]/.test(ch)) continue;
-        value += ch.toLowerCase();
-        map.push(i);
-      }
-      entry.norm = { value, map };
-    }
-    const stem = String(content || '').replace(/<[^>]*>/g, '');
-    let stemNorm = '';
-    for (const ch of stem) {
-      if (!/[\u4e00-\u9fa5A-Za-z0-9]/.test(ch)) continue;
-      stemNorm += ch.toLowerCase();
-    }
-    for (let start = 0; start < stemNorm.length && start < 80; start += 7) {
-      const probe = stemNorm.slice(start, start + 14);
-      if (probe.length < 10) break;
-      const at = entry.norm.value.indexOf(probe);
-      if (at < 0) continue;
-      const page = pageAt(entry, entry.norm.map[at]);
-      if (page) return page;
-    }
-  } catch { /* 忽略 */ }
-  return null;
-}
-
-/** 教材图号标注 → 插图索引 → 可用的图片 URL */
-function resolveFigures(subjectId, refs) {
+/**
+ * 明确图号 → 插图记录。只在「本章页范围 / 题目来源页」内确认；
+ * 同号图有多张或不在该范围内时放弃——教材正文图号与习题图号会重号，
+ * 全书唯一并不等于题目要的那张图。
+ */
+function resolveFigures(subjectId, refs, { page = 0, span = null, records } = {}) {
   const wanted = new Set((Array.isArray(refs) ? refs : [refs]).map(normalizeFigureNo).filter(Boolean));
   if (!wanted.size) return [];
-  const index = loadIndex(subjectId);
-  const seen = new Set();
+  const all = records || figureRecords(subjectId);
   const hits = [];
-  for (const figure of index.figures) {
-    const key = normalizeFigureNo(figure.no);
-    if (!wanted.has(key) || seen.has(key)) continue;
-    const absolute = path.join(assetDir(subjectId), `${figure.id}${IMAGE_EXT}`);
-    if (!fs.existsSync(absolute)) continue;
-    seen.add(key);
-    hits.push(figure);
+  for (const no of wanted) {
+    const sameNo = all.filter((figure) => normalizeFigureNo(figure.no) === no);
+    if (!sameNo.length) continue;
+    let pick = null;
+    if (span) {
+      const inSpan = sameNo.filter((figure) => Number(figure.page) >= span.from && Number(figure.page) <= span.to);
+      if (inSpan.length === 1) pick = inSpan[0];
+    } else if (page > 0) {
+      const onPage = sameNo.filter((figure) => Number(figure.page) === Number(page));
+      if (onPage.length === 1) pick = onPage[0];
+    }
+    if (pick) hits.push(pick);
   }
   return hits;
+}
+
+/** 候选图（不自动挂图时给用户选，或用于跳原页） */
+function listFigureCandidates(subjectId, refs, { page = 0, span = null } = {}) {
+  const wanted = new Set((Array.isArray(refs) ? refs : [refs]).map(normalizeFigureNo).filter(Boolean));
+  let list = figureRecords(subjectId);
+  if (wanted.size) list = list.filter((figure) => wanted.has(normalizeFigureNo(figure.no)));
+  else if (page > 0) list = list.filter((figure) => Number(figure.page) === Number(page));
+  else list = [];
+  if (span) list = list.filter((figure) => Number(figure.page) >= span.from && Number(figure.page) <= span.to);
+  return list.map(({ id, no, page: pageNo, caption, url }) => ({ id, no, page: pageNo, caption, url }));
 }
 
 /** 兜底：精确裁图没命中时，用整页扫描图 */
@@ -336,46 +281,51 @@ function resolvePageImage(subjectId, page) {
   return fs.existsSync(absolute) ? { file: hit.file, absolute } : null;
 }
 
-/** 给题目挂配图：优先精确裁出的插图，未命中时退回整页图 */
-function attachFiguresToQuestions(subjectId, questions, { pageByQuestion } = {}) {
-  const index = loadIndex(subjectId);
+/**
+ * 给题目挂配图。宁缺勿错：
+ * - 有明确图号：只在本章页范围 / 题目来源页内确认，不在范围内或有多张就放弃；
+ * - 没有明确图号（只写「如图」）：只有来源页恰好一张图时才自动挂，多图不猜；
+ * - 整页扫描图一律不写进材料区，只留 textbookPage 元数据供「查看教材第 N 页」入口使用。
+ */
+function attachFiguresToQuestions(subjectId, questions) {
   let attached = 0;
   let fallback = 0;
+  let pageLinks = 0;
+  const records = figureRecords(subjectId);
 
   const output = (questions || []).map((question) => {
     const content = String(question?.content || question?.contentHtml || question?.content_html || '');
     const refs = extractFigureRefs(content);
-    // 没写图号的「如图」也要兜底：只要题干提到图，就用来源页 / 图号推页挂整页图
-    const concerned = refs.length > 0 || hasFigureHint(content);
+    const hint = refs.length > 0 || hasFigureHint(content);
     const sourcePage = Number(question?.__sourcePage || question?.sourcePage) || 0;
-    let figures = refs.length ? resolveFigures(subjectId, refs) : [];
+    const span = pageSpanOf(question);
+
+    let figures = refs.length ? resolveFigures(subjectId, refs, { page: sourcePage, span, records }) : [];
     let source = 'figure';
 
-    if (!figures.length && concerned) {
-      // 教材抽取的题自带来源页：以题目实际所在页为准。
-      // 不能再用图号在全书中查页——章节正文和章末习题的图号会各编一套（如正文图 2-6 是 RC 电路，
-      // 习题图 2-6 是框图），按图号查会稳定挂到正文页上，正是之前 13 题配错页的原因。
-      // 人工导入的题没有来源页，才退回图号 / 原文定位；两者都定位不到就不挂图。
-      let page = null;
-      if (sourcePage > 0) {
-        page = sourcePage;
-      } else if (question?.__fromTextbook) {
-        // 教材抽取但没拿到确切页码：不再按图号全书乱查（正文/习题图号会重号），宁可不挂图
-        page = null;
-      } else {
-        page = (refs.length ? pageByFigureNo(subjectId, refs[0]) : pageByQuestionText(subjectId, content))
-          || pageByQuestion?.[question?.id]
-          || (!refs.length ? null : guessPageFromFigures(index, refs));
-      }
-      const url = page ? ensurePageFallbackAsset(subjectId, page) : null;
-      if (url) {
-        figures = [{ no: refs[0] || '', page, url }];
-        source = 'page';
+    // 图号对不上（或题干只写「如图」）时，只信「同页/本章范围内唯一一张图」
+    if (!figures.length && hint) {
+      const scope = sourcePage > 0
+        ? records.filter((figure) => Number(figure.page) === sourcePage)
+        : (span ? records.filter((figure) => Number(figure.page) >= span.from && Number(figure.page) <= span.to) : []);
+      if (scope.length === 1) {
+        figures = scope;
+        source = sourcePage > 0 ? 'page-single' : 'span-single';
         fallback += 1;
       }
     }
 
-    if (!figures.length) return question;
+    // 整页图只作为「查看教材第 N 页」的元数据，绝不进材料区冒充图 X-Y
+    const pageImage = sourcePage > 0 ? resolvePageImage(subjectId, sourcePage) : null;
+    const textbookPage = pageImage ? { page: sourcePage, file: pageImage.file } : null;
+    if (textbookPage) pageLinks += 1;
+
+    if (!figures.length) {
+      if (!textbookPage) return question;
+      const candidates = listFigureCandidates(subjectId, refs, { page: sourcePage, span });
+      return { ...question, textbookPage, ...(candidates.length ? { figureCandidates: candidates } : {}) };
+    }
+
     attached += 1;
     // 只用 p / img：这两个标签在 textbookFormat 的富文本白名单和 RichQuestionContent 里都放行，
     // figure / figcaption 会被清洗掉，反而丢图。
@@ -388,16 +338,11 @@ function attachFiguresToQuestions(subjectId, questions, { pageByQuestion } = {})
       materialHtml: [question?.materialHtml || question?.material_html || '', html].filter(Boolean).join('\n'),
       figureIds: figures.map((item) => item.id || item.url),
       figureSource: source,
+      ...(textbookPage ? { textbookPage } : {}),
     };
   });
 
-  return { questions: output, attached, fallback };
-}
-
-function guessPageFromFigures(index, refs) {
-  const wanted = new Set(refs.map(normalizeFigureNo));
-  const hit = index.figures.find((item) => wanted.has(normalizeFigureNo(item.no)));
-  return hit?.page || null;
+  return { questions: output, attached, fallback, pageLinks };
 }
 
 function escapeHtml(text) {
@@ -484,6 +429,7 @@ module.exports = {
   normalizeFigureNo,
   extractFigureRefs,
   resolveFigures,
+  listFigureCandidates,
   resolvePageImage,
   attachFiguresToQuestions,
   ensurePageFallbackAsset,

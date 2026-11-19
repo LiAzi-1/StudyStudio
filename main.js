@@ -14,6 +14,7 @@ const wrongAssets = require("./src/main/wrongAssets.js");
 const obsidianSync = require("./src/main/obsidian/index.js");
 const runtimeEnv = require("./src/main/runtimeEnv.js");
 const subjectClassify = require("./src/main/subjectClassify.js");
+const analysisPlugins = require("./src/main/plugins/index.js");
 const { validateCitations } = require("./src/main/materialContext.js");
 const parseProcesses = require("./src/main/parseProcesses.js");
 const { parseKnowledgeSummaryTaxonomy, MODULE_LABELS } = require("./src/shared/knowledgeTaxonomy");
@@ -86,6 +87,9 @@ app.whenReady().then(() => {
 
   questionAssets.registerProtocol();
 
+  // 学科分析插件：扫描内置/用户插件目录；启用状态存 app_settings
+  analysisPlugins.attach({ app, database });
+
   // 初始化数据库
   // 失败时不能让 whenReady 链静默 reject：那样窗口永远不会创建，进程却一直挂着，
   // 用户看到的就是「应用打不开」。
@@ -114,6 +118,28 @@ app.whenReady().then(() => {
   runAutoBackup();
   const autoBackupTimer = setInterval(runAutoBackup, 60 * 60 * 1000);
   if (typeof autoBackupTimer.unref === 'function') autoBackupTimer.unref();
+
+  // 启动对账：把清单笔记正文同步回 subjects.knowledge_summary，
+  // 修正历史版本里「笔记改了、答疑/分类仍读旧快照」的分叉
+  try {
+    const reconciled = database.reconcileKnowledgeSummaries();
+    if (reconciled.updated > 0) {
+      console.log(`[Knowledge] 已同步 ${reconciled.updated} 个科目的知识清单快照`);
+    }
+  } catch (error) {
+    console.error('[Knowledge] 启动同步知识清单失败:', error?.message || error);
+  }
+
+  // 笔记分类迁移：补齐 学科笔记 / 答疑笔记 / 知识清单 三类与章节归属
+  // 必须在 Obsidian 同步前跑，否则首轮会按旧分类把笔记推进「未归类」
+  try {
+    const migratedNotes = database.migrateNoteTree();
+    if (migratedNotes.updated > 0) {
+      console.log(`[Notes] 已归类 ${migratedNotes.updated} 篇笔记（学科/清单/答疑）`);
+    }
+  } catch (error) {
+    console.error('[Notes] 笔记分类迁移失败:', error?.message || error);
+  }
 
   // Obsidian 联动：接管上下文、迁移旧仓库、跑一次同步、挂上自动拉取
   try {
@@ -601,6 +627,12 @@ ipcMain.handle("note:search", (event, { keyword, options } = {}) => {
 
 ipcMain.handle("note:tags", () => {
   return database.getNoteTags();
+});
+
+// 笔记树：学科 → 知识清单 / 学科笔记 / 答疑笔记 → 模块 → 笔记
+ipcMain.handle("note:tree", () => {
+  const subjectManager = require("./src/main/subjectManager.js");
+  return database.buildNoteTree(subjectManager.getSubjects());
 });
 
 /** 笔记候选：按标题/关键词列出，带科目、更新时间、字数 */
@@ -1537,6 +1569,41 @@ ipcMain.handle("subject:list", () => {
 ipcMain.handle("subject:get", (event, id) => {
   return subjectManager.getSubject(id);
 });
+
+/* --------------------------------------------- 学科分析插件 */
+
+ipcMain.handle("plugins:list", () => analysisPlugins.listPlugins());
+
+ipcMain.handle("plugins:devMode", () => ({ allowThirdParty: analysisPlugins.allowThirdParty() }));
+
+ipcMain.handle("plugins:detail", (event, id) => analysisPlugins.getDetail(id));
+
+ipcMain.handle("plugins:forSubject", (event, subjectId) => analysisPlugins.forSubject(subjectId));
+
+ipcMain.handle("plugins:setEnabled", (event, { id, enabled } = {}) =>
+  analysisPlugins.setEnabled(id, enabled));
+
+ipcMain.handle("plugins:import", async () => {
+  const picked = await dialog.showOpenDialog({
+    title: "导入学科分析插件",
+    properties: ["openFile"],
+    filters: [
+      { name: "插件清单", extensions: ["json", "ssplugin"] },
+    ],
+  });
+  if (picked.canceled || !picked.filePaths?.length) return { success: false, canceled: true };
+  return analysisPlugins.importFromFile(picked.filePaths[0]);
+});
+
+ipcMain.handle("plugins:importFile", (event, filePath) => analysisPlugins.importFromFile(filePath));
+
+ipcMain.handle("plugins:remove", (event, id) => analysisPlugins.removePlugin(id));
+
+ipcMain.handle("plugins:extract", (event, payload = {}) => analysisPlugins.extract(payload));
+
+ipcMain.handle("plugins:solve", (event, payload = {}) => analysisPlugins.solve(payload));
+
+ipcMain.handle("plugins:explain", (event, payload = {}) => analysisPlugins.explain(payload));
 
 /** 科目学习数据统计（题库/错题，含预置科目的分类联动） */
 ipcMain.handle("subject:stats", (event, id) => {
